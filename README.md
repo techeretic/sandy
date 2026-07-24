@@ -1,4 +1,4 @@
-# Sandy — SANdbloxable AI Assistant
+# Sandy — SANDBOXable AI Assistant
 
 A sandboxable AI assistant that operates within any sandbox environment, communicates exclusively through MCP servers, and never violates VPN or sandbox security policies.
 
