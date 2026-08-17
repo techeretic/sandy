@@ -68,4 +68,15 @@
   - **`manager.ts`**: `McpClientManager` — parallel `connectAll` (MCP-04), startup failure is **terminal and explicit** (MCP-10): failed servers are dropped from the callable set and reported so reports must surface them as gaps (RG-05); `health()` summary (MCP-09); `close()` idempotent.
 - SDK/TS gotchas hit and resolved: `Required<>` on an interface with optional members; SDK `FetchLike` is `(string|URL, RequestInit) => Promise<Response>` (no `RequestInfo` in our lib target); Zod 4 `z.record()` needs two args; `registerTool` without `inputSchema` makes the callback receive only `extra` (so the test server needed an explicit permissive schema to echo args); tool callback exceptions surface as `isError:true` results, not thrown errors — handled in `callTool`.
 - `tests/mcp.test.ts`: 13 new tests using real in-process `McpServer`s over `InMemoryTransport`, plus a `FlakyTransport` decorator (fails first N `tools/call` sends) for retry coverage, and a recording audit sink. **55/55 pass**, typecheck + build green.
-- Next: File Manager (FM-01..08) on top of PathConfinement — CRUD with confirmations, ignore patterns, journal.
+- Committed as `d02371e` and pushed.
+
+### 2026-08-17 (late night) — File Manager
+
+- Built `src/files/` — four modules:
+  - **`ignore.ts`** (FM-07): gitignore-lite matcher. A bare name (`node_modules`, `.git`) matches any path segment; `*`/`?` globs match per segment. If any segment matches, the path is ignored — which transitively covers "everything under an ignored dir".
+  - **`format.ts`** (FM-08): extension → format detection (text/markdown/csv/json, default text) + content validation. JSON must parse; CSV must have a consistent field count per row (quote-aware).
+  - **`journal.ts`** (FM-05, design-now per Q6): `MutationJournal` interface + `InMemoryJournal`. Every mutation journaled with before/after state; undo of the last N in reverse order. Deleted directories are snapshotted as a full subtree so undo restores them. The reversal function is injected, so a durable backend drops in behind the same interface. This is also the seam the write-approval gate (Q6) will hook into: ops only reach the journal after passing confirmation.
+  - **`file-manager.ts`** (FM-01..08): `FileManager` over `PathConfinement`. File CRUD + directory create/rename/delete; confirmation gates (delete/overwrite/rename/create — FM-04, tighten-never-loosen floor already enforced at config load); dry-run mode (FM-06); ignore rules applied on read, list (skipped AND never traversed), and every mutation (FM-07); format validation on write (FM-08).
+- Design call: `createDirectory` does NOT create parent directories implicitly (least privilege) — the caller creates each level; missing parent ⇒ explicit `not-found` with the missing path named.
+- `tests/files.test.ts`: 22 new tests — CRUD, confinement rejections (outside root, `..`), confirmation floors (overwrite/delete/create-strict), dry-run no-ops, directory ops + rename-outside-sandbox + rename-into-ignored, ignore-pattern matrix, format validation (bad JSON/CSV rejected, good accepted), undo journal (LIFO order, directory subtree restore, undo_depth cap, rename reversal). **77/77 pass**, typecheck + build green.
+- Next: Orchestrator (request parser, multi-step task routing, provenance, streaming progress per Q4, write-gate design per Q6) + audit logger integration.

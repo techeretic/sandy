@@ -61,6 +61,37 @@ export {
   type HealthSummary,
 } from "./mcp/manager.js";
 export { createTransport, guardedFetch } from "./mcp/transports.js";
+export {
+  ConfirmationRequiredError,
+  FileManager,
+  FileOpError,
+  NullFileAuditSink,
+  type FileAuditSink,
+  type FileMutationResult,
+  type FileOpErrorReason,
+  type FileOpOptions,
+  type FileReadResult,
+  type FileManagerOptions,
+} from "./files/file-manager.js";
+export {
+  InMemoryJournal,
+  type MutationJournal,
+  type MutationOp,
+  type MutationRecord,
+  type ReverseMutation,
+  type UndoResult,
+} from "./files/journal.js";
+export {
+  compilePatterns,
+  isIgnored,
+  isIgnoredByPatterns,
+} from "./files/ignore.js";
+export {
+  detectFormat,
+  validateContent,
+  SUPPORTED_FORMATS,
+  type FileFormat,
+} from "./files/format.js";
 export { resolveRetryPolicy, withRetry, DEFAULT_RETRY } from "./mcp/retry.js";
 export {
   McpCallError,
