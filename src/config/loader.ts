@@ -1,0 +1,180 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import {
+  mcpServersManifestSchema,
+  sandyConfigSchema,
+  type EnvRef,
+  type McpServersManifest,
+  type SandyConfig,
+} from "./schema.js";
+
+export class ConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConfigError";
+  }
+}
+
+function formatIssues(error: { issues: Array<{ path: PropertyKey[]; message: string }> }): string {
+  return error.issues
+    .map((issue) => `  - ${issue.path.join(".") || "(root)"}: ${issue.message}`)
+    .join("\n");
+}
+
+export function parseEnvRef(ref: EnvRef): string {
+  const match = /^\$\{([A-Z][A-Z0-9_]*)\}$/.exec(ref);
+  if (!match) throw new ConfigError(`invalid environment reference: ${ref}`);
+  return match[1] as string;
+}
+
+export class SecretResolver {
+  private readonly env: Readonly<Record<string, string | undefined>>;
+
+  constructor(env: Readonly<Record<string, string | undefined>>) {
+    this.env = env;
+  }
+
+  /** Resolve an env ref to its value. Call only at the point of use — never at load time. */
+  resolve(ref: EnvRef): string {
+    const name = parseEnvRef(ref);
+    const value = this.env[name];
+    if (value === undefined || value === "") {
+      throw new ConfigError(
+        `environment variable ${name} is not set (required by config); refusing to start`,
+      );
+    }
+    return value;
+  }
+
+  /** Fail-closed check that every referenced variable is present. */
+  check(refs: Iterable<EnvRef | undefined | null>): string[] {
+    const missing: string[] = [];
+    for (const ref of refs) {
+      if (!ref) continue;
+      const name = parseEnvRef(ref);
+      if (this.env[name] === undefined || this.env[name] === "") {
+        missing.push(name);
+      }
+    }
+    return [...new Set(missing)];
+  }
+}
+
+export interface LoadedConfig {
+  /** Validated main config. Secret fields contain "${VAR}" refs, never values. */
+  config: SandyConfig;
+  /** Validated MCP server manifest. */
+  manifest: McpServersManifest;
+  /** Directory containing sandy.json — used to resolve relative paths. */
+  configDir: string;
+  /** Absolute path to the resolved MCP server manifest. */
+  manifestPath: string;
+  /** Absolutized report output directory. */
+  reportOutputDir: string;
+  resolveSecret: (ref: EnvRef) => string;
+}
+
+interface EnvRefCollector {
+  refs: Set<EnvRef>;
+  visit: (value: unknown) => void;
+}
+
+function collectEnvRefs(value: unknown, collector: EnvRefCollector): void {
+  if (typeof value === "string") {
+    if (/^\$\{[A-Z][A-Z0-9_]*\}$/.test(value)) collector.refs.add(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collector.visit(item);
+    return;
+  }
+  if (value && typeof value === "object") {
+    for (const item of Object.values(value)) collector.visit(item);
+  }
+}
+
+export async function loadSandyConfig(
+  sandyPath: string,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): Promise<LoadedConfig> {
+  const rawMain = await readFile(sandyPath, "utf8").catch((err) => {
+    throw new ConfigError(`cannot read config file ${sandyPath}: ${(err as Error).message}`);
+  });
+
+  let mainJson: unknown;
+  try {
+    mainJson = JSON.parse(rawMain);
+  } catch (err) {
+    throw new ConfigError(`config file ${sandyPath} is not valid JSON: ${(err as Error).message}`);
+  }
+
+  const mainResult = sandyConfigSchema.safeParse(mainJson);
+  if (!mainResult.success) {
+    throw new ConfigError(`invalid sandy config at ${sandyPath}:\n${formatIssues(mainResult.error)}`);
+  }
+  const config = mainResult.data;
+
+  const configDir = path.dirname(path.resolve(sandyPath));
+  const manifestPath = path.isAbsolute(config.mcp_servers)
+    ? config.mcp_servers
+    : path.resolve(configDir, config.mcp_servers);
+
+  const rawManifest = await readFile(manifestPath, "utf8").catch((err) => {
+    throw new ConfigError(
+      `cannot read MCP server manifest ${manifestPath}: ${(err as Error).message}`,
+    );
+  });
+
+  let manifestJson: unknown;
+  try {
+    manifestJson = JSON.parse(rawManifest);
+  } catch (err) {
+    throw new ConfigError(
+      `MCP server manifest ${manifestPath} is not valid JSON: ${(err as Error).message}`,
+    );
+  }
+
+  const manifestResult = mcpServersManifestSchema.safeParse(manifestJson);
+  if (!manifestResult.success) {
+    throw new ConfigError(
+      `invalid MCP server manifest at ${manifestPath}:\n${formatIssues(manifestResult.error)}`,
+    );
+  }
+  const manifest = manifestResult.data;
+
+  for (const server of manifest.servers) {
+    if (server.transport !== "sse" && server.transport !== "http") continue;
+    const url = new URL(server.url);
+    const endpoint = url.port ? `${url.hostname}:${url.port}` : url.hostname;
+    if (!config.sandbox.allowed_network.includes(endpoint)) {
+      throw new ConfigError(
+        `MCP server "${server.name}" targets ${endpoint}, which is not in sandbox.allowed_network (VPN-02: egress restricted to declared endpoints)`,
+      );
+    }
+  }
+
+  const collector: EnvRefCollector = { refs: new Set(), visit: (v) => collectEnvRefs(v, collector) };
+  collector.visit(config);
+  collector.visit(manifest);
+
+  const resolver = new SecretResolver(env);
+  const missing = resolver.check(collector.refs);
+  if (missing.length > 0) {
+    throw new ConfigError(
+      `required environment variable(s) not set: ${missing.join(", ")}. Refusing to start (fail-closed).`,
+    );
+  }
+
+  const reportOutputDir = path.isAbsolute(config.report_output_dir)
+    ? config.report_output_dir
+    : path.resolve(configDir, config.report_output_dir);
+
+  return {
+    config,
+    manifest,
+    configDir,
+    manifestPath,
+    reportOutputDir,
+    resolveSecret: (ref) => resolver.resolve(ref),
+  };
+}

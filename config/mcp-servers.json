@@ -1,0 +1,25 @@
+{
+  "servers": [
+    {
+      "name": "crm",
+      "transport": "stdio",
+      "command": ["npx", "-y", "@company/crm-mcp-server"],
+      "env": { "CRM_API_KEY": "${CRM_API_KEY}" },
+      "version": "1.4.2",
+      "capabilities": ["read_deals", "read_contacts"],
+      "allowed_tools": ["read_deals", "read_contacts"]
+    },
+    {
+      "name": "jira",
+      "transport": "sse",
+      "url": "https://jira.internal:8443/mcp",
+      "auth": {
+        "type": "bearer",
+        "token": "${JIRA_TOKEN}"
+      },
+      "version": "0.9.1",
+      "capabilities": ["read_sprints", "read_issues"],
+      "allowed_tools": ["read_sprints", "read_issues"]
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "mode": "plugin",
+  "llm": {
+    "provider": "host"
+  },
+  "sandbox": {
+    "runtime": "docker",
+    "allowed_paths": ["/home/user/sandy-workspace"],
+    "allowed_network": ["internal.company.com:443", "jira.internal:8443"],
+    "max_memory_mb": 2048,
+    "max_cpu_percent": 50
+  },
+  "mcp_servers": "./mcp-servers.json",
+  "report_output_dir": "./reports",
+  "policy": {
+    "confirmation_required": ["delete", "overwrite"],
+    "undo_depth": 10,
+    "dry_run_default": false,
+    "audit_payload_logging": false,
+    "ignore_patterns": ["node_modules/", ".git/", "*.env", ".secret"]
+  },
+  "preferences": {
+    "default_report_format": "markdown",
+    "max_concurrent_mcp_calls": 5,
+    "stream_progress": true
+  }
+}

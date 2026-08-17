@@ -62,7 +62,13 @@ User (CLI / Claude Code / Codex)
 
 ## Status
 
-This repository is in the planning phase. Phase 1 will ship as a Claude Code / Codex plugin.
+Phase 1 in progress. Delivered so far:
+
+- Decisions on all open PRD questions (`docs/DECISIONS.md`)
+- TypeScript/Node scaffold with config layer: Zod schemas + fail-closed loader for `sandy.json` / `mcp-servers.json` (env-ref-only secrets, exact version pins, VPN-02 egress cross-check, strict/FM-04 policy floors)
+- Example configs in `config/`, test suite (`npm test`)
+
+Next: Sandbox Enforcer, then MCP Client Manager.
 
 ## License
 

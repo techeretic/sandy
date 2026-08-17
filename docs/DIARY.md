@@ -1,0 +1,45 @@
+# Work Diary
+
+## 2026-08-17
+
+- Pulled latest from `origin/master` (f1cafbd → 28d02ba; only change was README.md).
+- Reviewed `README.md` and `docs/PRD_Final.md` (authoritative PRD; merged from PRD.md + PRD_Claude.md).
+- Confirmed project scope: Sandy — a sandboxable AI assistant that lives inside a user-defined sandbox, talks to internal services exclusively via MCP servers, and produces provenance-tracked reports. Phase 1 = Claude Code / Codex plugin (read-and-report only). Phase 2 = standalone service with bundled 4–8B LLM for air-gapped use.
+- Agreed next steps (planning → build):
+  1. Resolve PRD §13 open questions.
+  2. Write a design/ADR doc capturing those decisions.
+  3. Define config schemas (`sandy.json`, `mcp-servers.json`) as the contract first.
+  4. Build Phase 1 in dependency order: Sandbox Enforcer → MCP Client Manager → File Manager → Orchestrator + audit logging → Claude Code / Codex plugin interface.
+  5. Stand up egress conformance test (zero traffic outside declared MCP endpoints) in ≥2 sandboxes (Docker + Firejail).
+- Resolved all 9 open questions from PRD §13 (see `docs/DECISIONS.md`):
+  1. Sandboxes: Docker + Firejail at launch; enforcer stays runtime-agnostic.
+  2. Stack: TypeScript/Node.
+  3. Distribution: git repo + manual install.
+  4. Streaming: yes, stream progress in v1.
+  5. Multi-user: one instance per user.
+  6. Write-back: defer implementation, design approval-gate architecture now.
+  7. MCP versioning: pin in `mcp-servers.json`, VCS-reviewed.
+  8. Long-running tasks: session-scoped only in v1.
+  9. MCP authoring: include scaffolding tools.
+- Next: scaffold the repo — config schemas (`sandy.json`, `mcp-servers.json`) first.
+
+### 2026-08-17 (afternoon) — Repo scaffold + config layer
+
+- Initialized TypeScript/Node repo (ESM, strict, Node 22). Scripts: `build`, `typecheck`, `test`.
+- **Pinned TypeScript to 5.9.x.** `npm i typescript` pulled 7.0.2 (the new native Go compiler, `tsgo`), which fails to auto-include `@types/node` for in-project files (TS2591 on `node:*` imports) unless `types: ["node"]` is set explicitly. Known-bad for v1; revisit once 7.x stabilizes.
+- Implemented `src/config/schema.ts`:
+  - `envRefSchema` — secrets only as `${VAR}` refs (MCP-08); literal values rejected
+  - `absolutePathSchema` — no `..` traversal (SB-06)
+  - `endpointSchema` — hostname[:port] allowlist entries (VPN-02)
+  - `semverPinSchema` — exact version pins only (Q7)
+  - MCP server manifest: discriminated union stdio/sse/http, per-server `allowed_tools` ⊆ `capabilities` (MCP-07), unique names, strict objects
+  - Policy: `confirmation_required` must always include `delete` + `overwrite` (FM-04 floor — users can tighten, never loosen)
+- Implemented `src/config/loader.ts` (CP-04 fail-closed):
+  - Validates both files, clear per-field errors
+  - Cross-checks remote MCP endpoints against `sandbox.allowed_network` (VPN-02)
+  - Pre-flight check that every referenced env var exists; refuses to start if not
+  - `SecretResolver` keeps secrets out of the parsed config object — values only at point of use
+- Example configs in `config/` (plugin mode, docker, crm stdio + jira sse).
+- `tests/config.test.ts`: 13 tests, all pass — covers valid load, no secret leakage into config, literal-secret rejection, missing env fail-closed, strict unknown fields, `..` path rejection, tool-allowlist ⊆ capabilities, duplicate names, range-version rejection, VPN-02 egress violation, FM-04 floor, malformed JSON, missing manifest.
+- Smoke-tested: built + loaded example configs through the real loader. Green.
+- Next: Sandbox Enforcer (SB-03/04/06) for Docker + Firejail.
