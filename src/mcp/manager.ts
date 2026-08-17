@@ -5,7 +5,15 @@ import {
   type ManagedServerOptions,
 } from "./managed-server.js";
 import { resolveRetryPolicy } from "./retry.js";
-import { NullAuditSink, type HealthState, type McpAuditSink, type McpClientOptions, type RetryPolicy, type TransportFactory } from "./types.js";
+import {
+  McpCallError,
+  NullAuditSink,
+  type HealthState,
+  type McpAuditSink,
+  type McpClientOptions,
+  type RetryPolicy,
+  type TransportFactory,
+} from "./types.js";
 import type { NetworkGuard } from "../sandbox/network.js";
 
 export interface ConnectResult {
@@ -111,11 +119,16 @@ export class McpClientManager {
   getServer(name: string): ManagedServer {
     const server = this.servers.get(name);
     if (!server) {
-      throw new Error(
-        this.failed.has(name)
-          ? `MCP server "${name}" failed to connect at startup and is unavailable for this session: ${this.failed.get(name)}`
-          : `unknown MCP server "${name}"`,
-      );
+      if (this.failed.has(name)) {
+        throw new McpCallError(
+          name,
+          "*",
+          "server-unreachable",
+          `MCP server "${name}" failed to connect at startup and is unavailable for this session: ${this.failed.get(name)}`,
+          false,
+        );
+      }
+      throw new Error(`unknown MCP server "${name}"`);
     }
     return server;
   }

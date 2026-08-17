@@ -92,6 +92,45 @@ export {
   SUPPORTED_FORMATS,
   type FileFormat,
 } from "./files/format.js";
+export {
+  InMemoryAuditLogger,
+  JsonlAuditLogger,
+  logModelInvocation,
+  mcpAuditSink,
+  fileAuditSink,
+  type AuditEvent,
+  type AuditEventType,
+  type AuditLogger,
+} from "./audit/logger.js";
+export {
+  captureTranscript,
+  transcriptToJSON,
+  transcriptToMarkdown,
+  type Transcript,
+} from "./audit/transcript.js";
+export {
+  Orchestrator,
+  type Claim,
+  type GatherTask,
+  type Gap,
+  type OrchestratorOptions,
+  type OrchestratorRequest,
+  type OrchestratorResult,
+  type ProgressEvent,
+  type RenderReportInput,
+} from "./orchestrator/orchestrator.js";
+export { renderMarkdownReport } from "./orchestrator/report.js";
+export {
+  createOrchestrator,
+  type OrchestratorFactoryOptions,
+} from "./orchestrator/factory.js";
+export {
+  ReadOnlyGate,
+  logWriteAttempt,
+  type WriteApprovalGate,
+  type WriteDecision,
+  type WriteTask,
+} from "./orchestrator/write-gate.js";
 export { resolveRetryPolicy, withRetry, DEFAULT_RETRY } from "./mcp/retry.js";
 export {
   McpCallError,

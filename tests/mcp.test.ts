@@ -1,6 +1,3 @@
-import { z } from "zod";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { JSONRPCMessage, MessageExtraInfo } from "@modelcontextprotocol/sdk/types.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { describe, expect, it } from "vitest";
@@ -13,58 +10,17 @@ import {
   guardedFetch,
   withRetry,
   resolveRetryPolicy,
-  type McpServer as McpServerConfig,
   type McpAuditSink,
   type McpCallRecord,
 } from "../src/index.js";
+import {
+  makeInMemoryServer,
+  serverConfig,
+  instantRetry,
+  type TestServer,
+} from "./helpers/mcp.js";
 
 const resolver = new SecretResolver({ SOME_TOKEN: "tok-123" });
-
-function serverConfig(
-  name: string,
-  tools: string[],
-  over: Partial<Record<string, unknown>> = {},
-): McpServerConfig {
-  return {
-    name,
-    transport: "stdio",
-    command: ["true"],
-    version: "1.0.0",
-    capabilities: tools,
-    allowed_tools: tools,
-    ...over,
-  } as McpServerConfig;
-}
-
-/** Stand up an in-process MCP server exposing the given tools. */
-async function makeInMemoryServer(
-  name: string,
-  tools: Array<{ name: string; fail?: boolean }>,
-): Promise<{ transport: Transport; calls: Map<string, number>; close: () => Promise<void> }> {
-  const server = new McpServer({ name: `test-${name}`, version: "1.0.0" });
-  const calls = new Map<string, number>();
-  for (const tool of tools) {
-    server.registerTool(
-      tool.name,
-      { description: `test tool ${tool.name}`, inputSchema: z.record(z.string(), z.unknown()) },
-      async (args: unknown, _extra: unknown) => {
-        calls.set(tool.name, (calls.get(tool.name) ?? 0) + 1);
-        if (tool.fail) throw new Error(`boom from ${tool.name}`);
-        return { content: [{ type: "text", text: JSON.stringify(args ?? {}) }] };
-      },
-    );
-  }
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  await server.connect(serverTransport);
-  return {
-    transport: clientTransport,
-    calls,
-    close: async () => {
-      await server.close();
-      await clientTransport.close();
-    },
-  };
-}
 
 /** Wraps a real transport and fails the first N tools/call sends. */
 class FlakyTransport implements Transport {
@@ -115,8 +71,6 @@ class RecordingAudit implements McpAuditSink {
   }
 }
 
-const instantSleep = async () => {};
-const fastRetry = { maxRetries: 2, baseDelayMs: 1, factor: 1, maxDelayMs: 1, sleep: instantSleep };
 
 describe("McpClientManager", () => {
   it("connects multiple servers in one session (MCP-04)", async () => {
@@ -127,7 +81,7 @@ describe("McpClientManager", () => {
       resolver,
       new NetworkGuard([]),
       {
-        retry: fastRetry,
+        retry: instantRetry,
         transportFactory: (cfg) => (cfg.name === "a" ? a.transport : b.transport),
       },
     );
@@ -153,7 +107,7 @@ describe("McpClientManager", () => {
       [serverConfig("a", ["real_tool", "ghost_tool"])],
       resolver,
       new NetworkGuard([]),
-      { retry: fastRetry, transportFactory: () => a.transport },
+      { retry: instantRetry, transportFactory: () => a.transport },
     );
     try {
       await manager.connectAll();
@@ -174,7 +128,7 @@ describe("McpClientManager", () => {
       resolver,
       new NetworkGuard([]),
       {
-        retry: fastRetry,
+        retry: instantRetry,
         transportFactory: (cfg) => {
           if (cfg.name === "broken") {
             const dead: Transport = {
@@ -214,7 +168,7 @@ describe("McpClientManager", () => {
       [serverConfig("a", ["allowed", "forbidden"], { allowed_tools: ["allowed"] })],
       resolver,
       new NetworkGuard([]),
-      { retry: fastRetry, transportFactory: () => a.transport },
+      { retry: instantRetry, transportFactory: () => a.transport },
     );
     try {
       await manager.connectAll();
@@ -237,7 +191,7 @@ describe("McpClientManager", () => {
       [serverConfig("a", ["read_a"])],
       resolver,
       new NetworkGuard([]),
-      { retry: fastRetry, transportFactory: () => flaky },
+      { retry: instantRetry, transportFactory: () => flaky },
     );
     try {
       await manager.connectAll();
@@ -256,7 +210,7 @@ describe("McpClientManager", () => {
       [serverConfig("a", ["read_a"])],
       resolver,
       new NetworkGuard([]),
-      { retry: fastRetry, transportFactory: () => flaky },
+      { retry: instantRetry, transportFactory: () => flaky },
     );
     try {
       await manager.connectAll();
@@ -279,7 +233,7 @@ describe("McpClientManager", () => {
       [serverConfig("a", ["boom"])],
       resolver,
       new NetworkGuard([]),
-      { retry: fastRetry, transportFactory: () => flaky },
+      { retry: instantRetry, transportFactory: () => flaky },
     );
     try {
       await manager.connectAll();
@@ -300,7 +254,7 @@ describe("McpClientManager", () => {
       [serverConfig("a", ["read_a"])],
       resolver,
       new NetworkGuard([]),
-      { retry: fastRetry, audit, transportFactory: () => a.transport },
+      { retry: instantRetry, audit, transportFactory: () => a.transport },
     );
     try {
       await manager.connectAll();
@@ -324,7 +278,7 @@ describe("McpClientManager", () => {
       [serverConfig("a", ["read_a"])],
       resolver,
       new NetworkGuard([]),
-      { retry: fastRetry, transportFactory: () => a.transport },
+      { retry: instantRetry, transportFactory: () => a.transport },
     );
     await manager.connectAll();
     await manager.close();
