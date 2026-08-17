@@ -43,3 +43,16 @@
 - `tests/config.test.ts`: 13 tests, all pass — covers valid load, no secret leakage into config, literal-secret rejection, missing env fail-closed, strict unknown fields, `..` path rejection, tool-allowlist ⊆ capabilities, duplicate names, range-version rejection, VPN-02 egress violation, FM-04 floor, malformed JSON, missing manifest.
 - Smoke-tested: built + loaded example configs through the real loader. Green.
 - Next: Sandbox Enforcer (SB-03/04/06) for Docker + Firejail.
+
+### 2026-08-17 (evening) — Sandbox Enforcer
+
+- Committed the config layer as `fa61dc5` and pushed.
+- Built `src/sandbox/` — four modules + facade:
+  - **`detect.ts`** (SB-03): runtime detection for gVisor, Firejail, Docker/K8s-pod, WSL, with evidence strings. Detection context is injectable for tests.
+  - **`confinement.ts`** (SB-06): `PathConfinement` — every path must pass `resolve()`. Rejects null bytes, `..` traversal lexically, and — the important part — **symlink escapes**: resolves the deepest existing prefix via realpath and requires the real result to be inside a declared root. Missing containing root = fail-closed `root-missing`.
+  - **`capabilities.ts`** (SB-04/05): declarative `CapabilityManifest` (filesystem roots, network endpoints, subprocess needs) + `probeCapabilities` → explicit `CapabilityReport` with `lost[]` entries; Sandy starts in **reduced mode and reports what it lost** rather than failing opaquely. No runtime capability escalation (SB-05).
+  - **`network.ts`** (SB-07/VPN-02): `NetworkGuard` — the single choke point the MCP transport layer must call before any dial. http(s) only, endpoint must be in the declared allowlist, case-insensitive hostnames, port-sensitive.
+  - **`enforcer.ts`**: `SandboxEnforcer.create()` facade — refuses to start with no detected boundary (unless `runtime: "custom"`), fails closed on declared-vs-detected runtime mismatch (docker→k8s-pod compatible).
+- **Security note:** first draft of `confinement.ts` had a real hole — with a missing root, the walk-up loop climbed to an existing ancestor (/tmp) and reconstructed the tail, so `resolve()` "succeeded" outside the root. Fixed by requiring the containing root to exist before walking. Caught by the test suite.
+- `tests/sandbox.test.ts`: 29 new tests (detection matrix, `..`/absolute/null-byte/symlink escapes, multi-root, missing root, NetworkGuard matrix, enforcer mismatch/reduced-mode). **42/42 pass**, typecheck + build green.
+- Next: MCP Client Manager (stdio + sse/http transports, auth, health, retries, tool allowlist enforcement).

@@ -66,9 +66,10 @@ Phase 1 in progress. Delivered so far:
 
 - Decisions on all open PRD questions (`docs/DECISIONS.md`)
 - TypeScript/Node scaffold with config layer: Zod schemas + fail-closed loader for `sandy.json` / `mcp-servers.json` (env-ref-only secrets, exact version pins, VPN-02 egress cross-check, strict/FM-04 policy floors)
-- Example configs in `config/`, test suite (`npm test`)
+- Sandbox Enforcer (`src/sandbox/`): runtime detection (Docker, K8s, Firejail, WSL, gVisor), real-path-based path confinement with symlink-escape refusal (SB-06), declarative capability manifest with reduced-mode reporting (SB-04/05), and a NetworkGuard egress choke point (SB-07/VPN-02)
+- Example configs in `config/`, test suite (`npm test`) — 42 tests passing
 
-Next: Sandbox Enforcer, then MCP Client Manager.
+Next: MCP Client Manager.
 
 ## License
 
