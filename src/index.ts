@@ -51,3 +51,26 @@ export {
   SandboxEnforcer,
   type SandboxEnforcerOptions,
 } from "./sandbox/enforcer.js";
+export {
+  ManagedServer,
+  type ManagedServerOptions,
+} from "./mcp/managed-server.js";
+export {
+  McpClientManager,
+  type ConnectResult,
+  type HealthSummary,
+} from "./mcp/manager.js";
+export { createTransport, guardedFetch } from "./mcp/transports.js";
+export { resolveRetryPolicy, withRetry, DEFAULT_RETRY } from "./mcp/retry.js";
+export {
+  McpCallError,
+  NullAuditSink,
+  type HealthState,
+  type McpAuditSink,
+  type McpCallFailureReason,
+  type McpCallRecord,
+  type McpClientOptions,
+  type RetryPolicy,
+  type ServerHealth,
+  type TransportFactory,
+} from "./mcp/types.js";

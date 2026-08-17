@@ -55,4 +55,17 @@
   - **`enforcer.ts`**: `SandboxEnforcer.create()` facade — refuses to start with no detected boundary (unless `runtime: "custom"`), fails closed on declared-vs-detected runtime mismatch (docker→k8s-pod compatible).
 - **Security note:** first draft of `confinement.ts` had a real hole — with a missing root, the walk-up loop climbed to an existing ancestor (/tmp) and reconstructed the tail, so `resolve()` "succeeded" outside the root. Fixed by requiring the containing root to exist before walking. Caught by the test suite.
 - `tests/sandbox.test.ts`: 29 new tests (detection matrix, `..`/absolute/null-byte/symlink escapes, multi-root, missing root, NetworkGuard matrix, enforcer mismatch/reduced-mode). **42/42 pass**, typecheck + build green.
-- Next: MCP Client Manager (stdio + sse/http transports, auth, health, retries, tool allowlist enforcement).
+- Committed as `a41fb93` and pushed.
+
+### 2026-08-17 (night) — MCP Client Manager
+
+- Added `@modelcontextprotocol/sdk` (client + server + in-memory transport). Verified the real API surface before coding (Client/`callTool`/`listTools`, `StdioClientTransport`, `SSEClientTransport`, `StreamableHTTPClientTransport`, `InMemoryTransport.createLinkedPair`, `McpServer.registerTool`, `FetchLike`).
+- Built `src/mcp/`:
+  - **`types.ts`**: health states (disconnected/connected/degraded/unreachable — MCP-09), `McpCallRecord` (args by sha256 hash only — AU-02), `McpAuditSink` interface (MCP-12), `McpCallError` with failure reasons + retryable flag, `RetryPolicy`.
+  - **`retry.ts`**: `withRetry` — exponential backoff, capped, only retries failures classified as transient (MCP-11). Injectable sleep for tests.
+  - **`transports.ts`**: `createTransport` (stdio/sse/streamable-http; bearer/api-key auth resolved from `SecretResolver` at construction — never stored; stdio env from env refs) and `guardedFetch` — wraps the SDK's `fetch` option so **every HTTP request passes the NetworkGuard** (SB-07/VPN-02 at the socket layer, not just config time). OAuth/mtls noted as Phase 1 follow-up.
+  - **`managed-server.ts`**: `ManagedServer` — connect + validate (MCP-03: allowed tools cross-checked against the server's actual `tools/list`; missing tools ⇒ degraded, said out loud), `callTool` with per-server allowlist enforced **before anything hits the wire** (MCP-07), retry classification (transport/timeout = retryable; `McpError` and `isError` tool results = protocol, never retried), audit per call.
+  - **`manager.ts`**: `McpClientManager` — parallel `connectAll` (MCP-04), startup failure is **terminal and explicit** (MCP-10): failed servers are dropped from the callable set and reported so reports must surface them as gaps (RG-05); `health()` summary (MCP-09); `close()` idempotent.
+- SDK/TS gotchas hit and resolved: `Required<>` on an interface with optional members; SDK `FetchLike` is `(string|URL, RequestInit) => Promise<Response>` (no `RequestInfo` in our lib target); Zod 4 `z.record()` needs two args; `registerTool` without `inputSchema` makes the callback receive only `extra` (so the test server needed an explicit permissive schema to echo args); tool callback exceptions surface as `isError:true` results, not thrown errors — handled in `callTool`.
+- `tests/mcp.test.ts`: 13 new tests using real in-process `McpServer`s over `InMemoryTransport`, plus a `FlakyTransport` decorator (fails first N `tools/call` sends) for retry coverage, and a recording audit sink. **55/55 pass**, typecheck + build green.
+- Next: File Manager (FM-01..08) on top of PathConfinement — CRUD with confirmations, ignore patterns, journal.
