@@ -4,7 +4,7 @@ _Last updated 2026-08-18. Read this together with `docs/DIARY.md` (chronological
 
 ## Status
 
-The **core library is built, tested, composed into a runnable `sandy` binary, and wired into a Claude Code / Codex plugin** (112/112 tests, typecheck + build green). The Phase 1 flagship is now in place: the host LLM reasons, and Sandy executes the nine `sandy.*` host-side tools inside the sandbox. The remaining launch work is the conformance gate (egress + sandbox, items 3/4).
+The **core library is built, tested, composed into a runnable `sandy` binary, wired into a Claude Code / Codex plugin, and the egress conformance gate now passes** (117/117 tests + conformance, typecheck + build green). The Phase 1 flagship is in place and the launch success criterion — "zero network egress outside declared MCP endpoints" — is proven both in-process and at the network level in Docker. Remaining: the sandbox conformance matrix (item 4, Docker + Firejail in CI).
 
 Commits so far (oldest → newest):
 - `fa61dc5` config layer (Zod schemas + fail-closed loader)
@@ -12,8 +12,9 @@ Commits so far (oldest → newest):
 - `d02371e` MCP Client Manager
 - `7e2609a` File Manager
 - `42db211` Audit Logger + Orchestrator
-- `9da1bd0` CLI / service entry point: `src/sandy.ts` + `src/cli.ts` + `bin` + `src/orchestrator/request.ts`
-- (uncommitted) Claude Code / Codex plugin: `src/plugin/` + `plugin/` manifest + install
+- `9da1bd0` CLI / service entry point
+- `17cdb8b` Claude Code / Codex plugin (`src/plugin/` + `plugin/`)
+- (uncommitted) egress conformance test: `conformance/` (+ `egress_blocked` audit wiring)
 
 ## What's built (do not rebuild)
 
@@ -51,14 +52,14 @@ The Phase 1 flagship. The host LLM does the reasoning (PL-03); Sandy is exposed 
 - Verified: real MCP stdio handshake lists all nine tools and `sandy.status` reports healthy; **112/112 tests** (was 105).
 - **Open (deferred):** how the host surfaces `ProgressEvent`s in its UI — collected in-band now; a host that only shows final results sees them on the result object.
 
-### 3. Egress conformance test (launch success criterion)
-Automate "zero network egress outside declared MCP endpoints" (verifiable at the network level) in **at least Docker + Firejail** (SB-09; PRD §11/§12).
-- A test harness that: starts Sandy inside the sandbox with a config allowing exactly one endpoint; runs a request; captures all outbound traffic (e.g. a transparent proxy / `iptables` + log, or `nethogs`/`tcpdump` in CI); asserts the only destination is the declared endpoint.
-- Also assert the reverse: with a malicious/undeclared endpoint in config, startup fails closed (VPN-02) and nothing leaves.
-- This is the single strongest claim in the PRD's success criteria — make it a first-class, CI-runnable check.
+### 3. Egress conformance test (launch success criterion) — DONE (2026-08-18, Docker)
+Proved "zero network egress outside declared MCP endpoints" (SB-09; PRD §11/§12) two ways. See `docs/DIARY.md` 2026-08-18 for the full write-up.
+- **In-process** (`conformance/egress.test.ts`, always runs): every dialed URL is the declared endpoint; an undeclared endpoint is refused before the dial; an egress block is recorded as `egress_blocked` (AU-01); a full `createSandy` run keeps all egress on the one endpoint; the loader fails closed on a config-time VPN-02 violation.
+- **Network-level, Docker** (`conformance/run-docker.sh` + `Dockerfile`): a Docker `--internal` network gives the sandbox a runtime-enforced zero-external-egress boundary. The declared endpoint is an EP container (logs each hit); asserts `sandy run` succeeds + the EP is hit, an external-egress probe is BLOCKED, and an undeclared endpoint fails closed (VPN-02) with nothing leaving.
+- Wired: `npm run conformance` (in-process + Docker). **Firejail** is the same harness with the boundary command swapped (enforcer is runtime-agnostic) — see item 4, since firejail isn't installed in this environment.
 
 ### 4. Sandbox conformance (SB-09/10)
-Confirm `sandy check`/`run` behave identically under Docker and Firejail (the enforcer is runtime-agnostic; this proves it). Add a smoke matrix to CI.
+Confirm `sandy check`/`run` behave identically under Docker and Firejail (the enforcer is runtime-agnostic; this proves it). Add a smoke matrix to CI. The egress Docker harness (`conformance/run-docker.sh`) is the template; extend it to run the same assertions under firejail and add both to a CI matrix.
 
 ### 5. Model engine wiring (depends on mode)
 - **Plugin mode:** no bundled model needed — the host LLM is the engine. Only need the `logModelInvocation` hook fed from the host (token counts) if the host exposes them.

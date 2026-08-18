@@ -4,16 +4,31 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { FetchLike, Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { McpServer } from "../config/schema.js";
 import type { SecretResolver } from "../config/loader.js";
+import type { AuditLogger } from "../audit/logger.js";
 import { NetworkEgressError, type NetworkGuard } from "../sandbox/network.js";
 
 /**
  * Wrap any fetch implementation so that every request is checked against the
  * egress allowlist (SB-07, VPN-02). This is the only path by which the MCP
- * client can touch the network.
+ * client can touch the network. When an `audit` logger is supplied, a refused
+ * dial is recorded as an `egress_blocked` event (AU-01) — a block is a fact
+ * that should be in the audit trail, not a silent throw.
  */
-export function guardedFetch(guard: NetworkGuard, inner: FetchLike = globalThis.fetch as FetchLike): FetchLike {
+export function guardedFetch(
+  guard: NetworkGuard,
+  inner: FetchLike = globalThis.fetch as FetchLike,
+  audit?: AuditLogger,
+): FetchLike {
   return async (url: string | URL, init?: RequestInit) => {
-    guard.assert(typeof url === "string" ? url : url.toString());
+    const target = typeof url === "string" ? url : url.toString();
+    try {
+      guard.assert(target);
+    } catch (err) {
+      if (err instanceof NetworkEgressError && audit) {
+        audit.append("egress_blocked", { target, reason: err.reason });
+      }
+      throw err;
+    }
     return inner(url, init);
   };
 }

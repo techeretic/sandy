@@ -28,7 +28,10 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "conformance": "npm run test:conformance && npm run conformance:docker",
+    "test:conformance": "vitest run conformance",
+    "conformance:docker": "npm run build && bash conformance/run-docker.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

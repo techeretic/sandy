@@ -138,3 +138,25 @@ Built the plugin on top of `createSandy`. Key design decision (locked first): **
 - **Open (documented in NEXT_STEPS):** how the host surfaces `ProgressEvent`s in its UI (collected in-band now; a host that only shows final results sees them on the result object).
 - **112/112 tests pass** (was 105), typecheck + build green.
 - Next: item 3 — the egress conformance test (launch success criterion), then item 4 sandbox conformance.
+
+### Egress conformance test (NEXT_STEPS item 3) — launch success criterion
+
+Proved "zero network egress outside declared MCP endpoints" (SB-09 / PRD §11-12) two ways: **in-process** (always runs in CI) and **at the network level in Docker** (the strongest claim, first-class and CI-runnable).
+
+- **`src/mcp/transports.ts` — made egress blocks auditable.** `guardedFetch` now takes an optional `AuditLogger` and, when it refuses a dial, records an `egress_blocked` event (AU-01). The event type existed but was never wired — a block is now a fact in the audit trail, not a silent throw.
+- **`conformance/ep-server.mjs`** — a real **streamable-HTTP** MCP endpoint (exposes `read_deals`) that listens on a port. Optional `EP_LOG` env makes it append every request it receives — that file is the network-level "egress is observable" signal (the declared endpoint is hit, and it says so). Stateless streamable-HTTP needs a fresh `McpServer`+transport per request (the SDK binds one protocol to one connection) — that was the one non-obvious gotcha.
+- **`conformance/egress.test.ts`** (5 tests, in-process, always runs):
+  1. a real run against the live HTTP endpoint — **every URL dialed is the declared endpoint** (recording fetch under `guardedFetch`);
+  2. an undeclared endpoint is refused and **the dial never happens** (VPN-02);
+  3. an egress block is **recorded as `egress_blocked`** in the audit log (AU-01);
+  4. a full `createSandy` run routes **all** egress through the guard to the one declared endpoint;
+  5. the loader **fails closed** on a remote endpoint not in `allowed_network` (VPN-02, config-time).
+- **`conformance/Dockerfile`** + **`conformance/run-docker.sh`** (network-level, Docker). The sandbox boundary is a Docker **`--internal` network** — the runtime guarantees a container on it has *zero* external egress; it can only reach other containers on that network. So the declared MCP endpoint = an EP container on the network; the internet / other hosts = unreachable by boundary. Asserts:
+  1. `sandy run` **succeeds** against the single declared endpoint (provenance claim + confined report) and the EP logs that it was actually hit;
+  2. an independent **external-egress probe from inside the sandbox FAILS** (explicit, verifiable: the boundary blocks non-declared egress);
+  3. the reverse — a config with an endpoint **not in `allowed_network` fails closed** at startup (VPN-02) and the EP is **never reached**.
+- **Scripts:** `npm run test:conformance` (in-process), `npm run conformance:docker` (build + Docker), `npm run conformance` (both).
+- **Verified:** in-process 5/5; Docker harness PASSES all three (run succeeded + EP hit, external egress BLOCKED, VPN-02 fail-closed with nothing leaving), clean teardown.
+- **Note:** SB-09 wants ≥2 sandboxes. Docker is done here. **Firejail is the same harness with the boundary command swapped** (the enforcer is runtime-agnostic) — left as item 4, since firejail isn't installed in this environment to verify against.
+- **117/117 tests** (was 112) + conformance; typecheck + build green.
+- Next: item 4 — sandbox conformance matrix (Docker + Firejail) in CI, proving the enforcer is runtime-agnostic.
