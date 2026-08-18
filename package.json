@@ -9,6 +9,9 @@
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "sandy": "bin/sandy.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

@@ -1,0 +1,312 @@
+import { mkdtemp, rm, writeFile, readFile as fsRead } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  ConfigError,
+  SandboxViolationError,
+  createSandy,
+  runCli,
+  EXIT,
+  type Sandy,
+} from "../src/index.js";
+import {
+  makeInMemoryServer,
+  type TestServer,
+} from "./helpers/mcp.js";
+
+const fixtureServer = fileURLToPath(new URL("./fixtures/stdio-mcp-server.mjs", import.meta.url));
+
+let root: string;
+const tmpDirs: string[] = [];
+const inMemServers: TestServer[] = [];
+
+async function tmpWorkspace(): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), "sandy-e2e-"));
+  tmpDirs.push(dir);
+  return dir;
+}
+
+/**
+ * Write a sandy.json + mcp-servers.json pair into `dir`.
+ * @param crmCommand the stdio command for the `crm` server. Pass the real
+ *   fixture for CLI e2e tests, or a harmless stub for createSandy tests
+ *   (whose transportFactory overrides it).
+ */
+async function writeConfig(
+  dir: string,
+  opts: {
+    allowedPaths: string[];
+    runtime?: string;
+    crmCommand?: string[];
+    extraServers?: unknown[];
+  },
+): Promise<string> {
+  const crm = {
+    name: "crm",
+    transport: "stdio",
+    command: opts.crmCommand ?? ["true"],
+    version: "1.0.0",
+    capabilities: ["read_deals"],
+    allowed_tools: ["read_deals"],
+  };
+  const manifest = { servers: [crm, ...(opts.extraServers ?? [])] };
+  const main = {
+    mode: "plugin",
+    llm: { provider: "host" },
+    sandbox: {
+      runtime: opts.runtime ?? "custom",
+      allowed_paths: opts.allowedPaths,
+      allowed_network: [],
+      max_memory_mb: 512,
+      max_cpu_percent: 25,
+    },
+    mcp_servers: "./mcp-servers.json",
+    report_output_dir: "./reports",
+    policy: {
+      confirmation_required: ["delete", "overwrite"],
+      undo_depth: 5,
+      dry_run_default: false,
+      audit_payload_logging: false,
+      ignore_patterns: [],
+    },
+  };
+  await writeFile(path.join(dir, "mcp-servers.json"), JSON.stringify(manifest, null, 2));
+  const cfgPath = path.join(dir, "sandy.json");
+  await writeFile(cfgPath, JSON.stringify(main, null, 2));
+  return cfgPath;
+}
+
+async function writeRequest(dir: string, body: unknown): Promise<string> {
+  const p = path.join(dir, "request.json");
+  await writeFile(p, JSON.stringify(body, null, 2));
+  return p;
+}
+
+async function closeAll(sandies: Sandy[]): Promise<void> {
+  for (const s of sandies) await s.close();
+}
+
+beforeAll(async () => {
+  root = await tmpWorkspace();
+});
+
+afterAll(async () => {
+  for (const s of inMemServers.splice(0)) await s.close();
+  for (const d of tmpDirs.splice(0)) await rm(d, { recursive: true, force: true });
+});
+
+describe("createSandy: composition (CLI/service spine)", () => {
+  it("wires config → sandbox → mcp → files → orchestrator and reports healthy", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, { allowedPaths: [ws] });
+    const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }]);
+    inMemServers.push(crm);
+
+    const sandy = await createSandy({
+      sandyPath: cfg,
+      transportFactory: () => crm.transport,
+    });
+    try {
+      const report = sandy.check();
+      expect(report.sandbox.declaredRuntime).toBe("custom");
+      expect(report.sandbox.degraded).toBe(false);
+      expect(report.sandbox.lost).toEqual([]);
+      expect(report.mcp.connected).toContain("crm");
+      expect(report.mcp.failed).toEqual([]);
+      expect(report.ok).toBe(true);
+    } finally {
+      await closeAll([sandy]);
+    }
+  });
+
+  it("runs a request end-to-end: gathers, writes a confined report, and audits", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, { allowedPaths: [ws] });
+    const auditFile = path.join(ws, "audit", "session.jsonl");
+    const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }]);
+    inMemServers.push(crm);
+
+    const sandy = await createSandy({
+      sandyPath: cfg,
+      auditFile,
+      transportFactory: () => crm.transport,
+    });
+    try {
+      const result = await sandy.run({
+        goal: "EMEA deals summary",
+        gather: [{ id: "deals", server: "crm", tool: "read_deals", args: { region: "emea" } }],
+        report: { title: "EMEA Deals", file: "emea-deals.md", summary: "Narrative." },
+      });
+
+      expect(result.claims).toHaveLength(1);
+      expect(result.claims[0]?.source.server).toBe("crm");
+      expect(result.claims[0]?.source.argsHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(result.gaps).toEqual([]);
+
+      const expected = path.join(ws, "reports", "emea-deals.md");
+      expect(result.reportPath).toBe(expected);
+      const onDisk = await fsRead(expected, "utf8");
+      expect(onDisk).toContain("# EMEA Deals");
+
+      const auditTypes = sandy.audit.events().map((e) => e.type);
+      expect(auditTypes).toContain("session_start");
+      expect(auditTypes).toContain("orchestrator_task");
+      expect(auditTypes).toContain("mcp_call");
+      expect(auditTypes).toContain("session_end");
+
+      // The JSONL file mirrors the in-memory log once flushed.
+      await sandy.audit.close();
+      const auditRaw = await fsRead(auditFile, "utf8");
+      const fileTypes = auditRaw
+        .trim()
+        .split("\n")
+        .map((l) => (JSON.parse(l) as { type: string }).type);
+      expect(fileTypes).toContain("session_end");
+    } finally {
+      await closeAll([sandy]);
+    }
+  });
+
+  it("reports a startup-failed MCP server (never throws, never hides it)", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, { allowedPaths: [ws] });
+
+    const sandy = await createSandy({
+      sandyPath: cfg,
+      transportFactory: () => ({
+        start: async () => {
+          throw new Error("connect ECONNREFUSED");
+        },
+        send: async () => {
+          throw new Error("closed");
+        },
+        close: async () => {},
+      }),
+    });
+    try {
+      const report = sandy.check();
+      expect(report.ok).toBe(false);
+      expect(report.mcp.failed.map((f) => f.server)).toEqual(["crm"]);
+
+      const result = await sandy.run({
+        goal: "deals",
+        gather: [{ id: "deals", server: "crm", tool: "read_deals", args: {} }],
+      });
+      expect(result.claims).toEqual([]);
+      expect(result.gaps[0]?.reason).toBe("server-unavailable");
+    } finally {
+      await closeAll([sandy]);
+    }
+  });
+});
+
+describe("createSandy: fail-closed contract", () => {
+  it("refuses to start unsandboxed (declared runtime but none detected)", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, { allowedPaths: [ws], runtime: "docker" });
+    await expect(
+      createSandy({
+        sandyPath: cfg,
+        detection: () => ({ runtime: "none", evidence: [] }),
+      }),
+    ).rejects.toThrow(SandboxViolationError);
+  });
+
+  it("fails closed on an invalid config (missing file)", async () => {
+    const ws = await tmpWorkspace();
+    await expect(createSandy({ sandyPath: path.join(ws, "does-not-exist.json") })).rejects.toThrow(
+      ConfigError,
+    );
+  });
+});
+
+describe("runCli: verbs + exit codes (real stdio MCP server)", () => {
+  const stdioCommand = [process.execPath, fixtureServer];
+
+  async function fixtures(): Promise<{ cfg: string; ws: string; req: string }> {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, { allowedPaths: [ws], crmCommand: stdioCommand });
+    const req = await writeRequest(ws, {
+      goal: "deals",
+      gather: [{ id: "deals", server: "crm", tool: "read_deals", args: { region: "emea" } }],
+      report: { title: "Deals", file: "deals.md" },
+    });
+    return { cfg, ws, req };
+  }
+
+  function captureStdout<T>(fn: () => Promise<T>): Promise<{ value: T; stdout: string; stderr: string }> {
+    const out: string[] = [];
+    const err: string[] = [];
+    const origOut = process.stdout.write.bind(process.stdout);
+    const origErr = process.stderr.write.bind(process.stderr);
+    (process.stdout as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+      out.push(s);
+      return true;
+    };
+    (process.stderr as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+      err.push(s);
+      return true;
+    };
+    return fn().then(
+      (value) => {
+        process.stdout.write = origOut as typeof process.stdout.write;
+        process.stderr.write = origErr as typeof process.stderr.write;
+        return { value, stdout: out.join(""), stderr: err.join("") };
+      },
+      (e: unknown) => {
+        process.stdout.write = origOut as typeof process.stdout.write;
+        process.stderr.write = origErr as typeof process.stderr.write;
+        throw e;
+      },
+    );
+  }
+
+  it("check --json exits 0 and emits a parseable, healthy report", async () => {
+    const { cfg } = await fixtures();
+    const { value, stdout } = await captureStdout(() =>
+      runCli(["check", "--config", cfg, "--json", "--no-progress"]),
+    );
+    expect(value).toBe(EXIT.ok);
+    const parsed = JSON.parse(stdout) as { ok: boolean; mcp: { connected: string[] } };
+    expect(parsed.ok).toBe(true);
+    expect(parsed.mcp.connected).toContain("crm");
+  });
+
+  it("run <request> exits 0 and writes a confined report", async () => {
+    const { cfg, ws, req } = await fixtures();
+    const { value } = await captureStdout(() =>
+      runCli(["run", req, "--config", cfg, "--no-progress"]),
+    );
+    expect(value).toBe(EXIT.ok);
+    const report = await fsRead(path.join(ws, "reports", "deals.md"), "utf8");
+    expect(report).toContain("# Deals");
+    expect(report).toContain("2 deals closed in emea");
+  });
+
+  it("missing config file exits with the config code (fail-closed)", async () => {
+    const { value } = await captureStdout(() => runCli(["check", "--config", path.join(root, "nope.json")]));
+    expect(value).toBe(EXIT.config);
+  });
+
+  it("invalid request file exits with the usage code", async () => {
+    const ws = await tmpWorkspace();
+    const bad = path.join(ws, "bad-request.json");
+    await writeFile(bad, JSON.stringify({ goal: "x", gather: [] }));
+    const { value } = await captureStdout(() => runCli(["run", bad, "--config", path.join(root, "nope.json")]));
+    expect(value).toBe(EXIT.usage);
+  });
+
+  it("unknown verb exits with the usage code", async () => {
+    const { value } = await captureStdout(() => runCli(["frobnicate"]));
+    expect(value).toBe(EXIT.usage);
+  });
+
+  it("--help exits 0 and prints usage", async () => {
+    const { value, stdout } = await captureStdout(() => runCli(["--help"]));
+    expect(value).toBe(EXIT.ok);
+    expect(stdout).toContain("sandy check");
+    expect(stdout).toContain("exit codes");
+  });
+});

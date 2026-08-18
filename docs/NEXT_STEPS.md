@@ -1,10 +1,10 @@
 # Next Steps — Resume Point
 
-_Last updated 2026-08-17. Read this together with `docs/DIARY.md` (chronological log) and `docs/DECISIONS.md` (resolved open questions)._
+_Last updated 2026-08-18. Read this together with `docs/DIARY.md` (chronological log) and `docs/DECISIONS.md` (resolved open questions)._
 
 ## Status
 
-All of the **core library is built and tested** (94/94 tests, typecheck + build green). The pieces are complete but **not yet composed into a runnable program or a plugin**. The remaining work is integration + the Phase 1 flagship deliverable (the Claude Code / Codex plugin) + the launch conformance gate.
+The **core library is built, tested, and now composed into a runnable `sandy` binary** (105/105 tests, typecheck + build green). `sandy check` and `sandy run <request.json>` work end-to-end against a real MCP server (see item 1 below — done). The remaining work is the Phase 1 flagship deliverable (the Claude Code / Codex plugin) + the launch conformance gate.
 
 Commits so far (oldest → newest):
 - `fa61dc5` config layer (Zod schemas + fail-closed loader)
@@ -12,6 +12,7 @@ Commits so far (oldest → newest):
 - `d02371e` MCP Client Manager
 - `7e2609a` File Manager
 - `42db211` Audit Logger + Orchestrator
+- (uncommitted) CLI / service entry point: `src/sandy.ts` + `src/cli.ts` + `bin` + `src/orchestrator/request.ts`
 
 ## What's built (do not rebuild)
 
@@ -22,25 +23,21 @@ Commits so far (oldest → newest):
 | MCP Client Manager | `src/mcp/` | multi-server lifecycle (stdio/sse/http), startup validation, per-server tool allowlists (pre-wire), retries/backoff, terminal failures, args-by-hash audit; all HTTP through NetworkGuard |
 | File Manager | `src/files/` | confined CRUD, confirmation gates, undo journal (+subtree snapshots), dry-run, ignore patterns, format validation (text/csv/json/md) |
 | Audit | `src/audit/` | append-only structured log (in-memory + JSONL), opt-in payloads, sink bridges, session transcript export |
-| Orchestrator | `src/orchestrator/` | bounded fan-out, provenance claims, explicit gaps, Markdown report renderer, progress events, write-gate contract (ReadOnlyGate) |
+| Orchestrator | `src/orchestrator/` | bounded fan-out, provenance claims, explicit gaps, Markdown report renderer, progress events, write-gate contract (ReadOnlyGate); `request.ts` Zod request schema (shared CLI/plugin) |
+| Sandy (composition) | `src/sandy.ts` | `createSandy(deps)` startup factory: config → enforcer → audit → MCP → files → orchestrator; `check()` report, `run()`, `close()`. Injectable transport/detection for tests |
+| CLI | `src/cli.ts`, `bin/sandy.js` | `sandy check` + `sandy run <request.json>`; `--json`/`--no-progress`/`-c`/`-o`; stable exit codes (0 ok / 1 error / 2 usage / 3 config / 4 sandbox) |
 
 Everything is exported from `src/index.ts`. Tests live in `tests/` (use `tests/helpers/mcp.ts` for in-process MCP servers).
 
 ## Remaining work, in order
 
-### 1. CLI / service entry point (do this first)
-Compose the existing modules into a runnable `sandy` binary that is the spine the plugin will attach to.
-- New: `src/sandy.ts` (a `createSandy(deps)` factory) + `src/cli.ts` + a `bin` entry in `package.json`.
-- Startup sequence (all already exist, just wire them):
-  1. `loadSandyConfig(sandyPath)` (fail-closed, CP-04)
-  2. `SandboxEnforcer.create(sandbox, manifest)` — refuses unsandboxed / runtime mismatch; surfaces reduced-mode report
-  3. `JsonlAuditLogger` (or in-memory) → derive `mcpAuditSink` + `fileAuditSink`
-  4. `McpClientManager(manifest.servers, resolver, new NetworkGuard(allowed_network), { audit: mcpAuditSink })` → `connectAll()`; record startup failures
-  5. `FileManager({ confinement: enforcer.paths, policy, journal, audit: fileAuditSink })`
-  6. `createOrchestrator({ manager, audit, files, reportDir })`
-- Minimal CLI verbs: `sandy check` (validate config + print capability/health report), `sandy run <request.json>` (execute an `OrchestratorRequest`, print claims/gaps, write report). Keep the model out of the CLI — it orchestrates; the LLM (plugin host or bundled) supplies the request.
-- Log the startup capability report + any reduced-mode losses; exit non-zero if unsandboxed.
-- **Verify:** end-to-end `sandy run` against an in-process or local stdio MCP server.
+### 1. CLI / service entry point — DONE (2026-08-18)
+Composed the modules into a runnable `sandy` binary (the spine the plugin attaches to). See `docs/DIARY.md` 2026-08-18 for the full write-up. Delivered:
+- `src/sandy.ts` — `createSandy(deps)`: config → enforcer → audit → MCP → files → orchestrator. Throws fail-closed on invalid config / unsandboxed / runtime mismatch; a *degraded* sandbox or failed MCP server is reported (via `check()`), not thrown. `check()`, `run()`, `close()`.
+- `src/orchestrator/request.ts` — Zod `orchestratorRequestSchema` + `toOrchestratorRequest` (shared wire format for CLI + plugin).
+- `src/cli.ts` + `bin/sandy.js` + `bin` in `package.json` — `sandy check`, `sandy run <request.json>`, `--json`/`--no-progress`/`-c`/`-o`; exit codes 0/1/2/3/4. Progress on stderr, results on stdout.
+- **Fixed a real leak:** `ManagedServer` now closes the transport on a failed connect (a failed stdio connect was orphaning its child process and hanging the process on exit).
+- Verified end-to-end against a real stdio MCP subprocess: `check --json` reports healthy; `run` streams progress, returns a provenance claim, writes the report to the confined `reports/` dir, and persists a JSONL audit.
 
 ### 2. Claude Code / Codex plugin (PL-01..PL-04) — the Phase 1 flagship
 - **Key design decision to lock first:** the plugin's tool surface. In plugin mode the *host* LLM does the reasoning (PL-03); Sandy exposes sandboxed capabilities the host can call. Recommended: expose Sandy as a small set of host-side tools:
@@ -82,4 +79,4 @@ Confirm `sandy check`/`run` behave identically under Docker and Firejail (the en
 - Update `docs/DIARY.md` per work block; keep `README.md` Status section current.
 
 ## Suggested first action for the next session
-Start **item 1 (CLI/service entry point)**: create `src/sandy.ts` + `src/cli.ts` + `bin`, wire the startup sequence, and get `sandy check` + `sandy run` working end-to-end against an in-process MCP server. That unblocks the plugin (item 2) and the conformance test (item 3), which both attach to it.
+Start **item 2 (Claude Code / Codex plugin)**: the Phase 1 flagship. Build `plugin/` on top of `createSandy` — expose the host-side tools (`sandy.gather`, `sandy.report`, `sandy.files.*`, `sandy.status`), a `sandy.plugin.json`/`.claude-plugin/plugin.json` manifest, and an install script (git repo + manual install, no registry). Reuse `src/orchestrator/request.ts` to validate tool bodies. The CLI (item 1) is the reference for how the modules compose and how progress/reports surface.

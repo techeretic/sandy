@@ -119,6 +119,13 @@ export {
   type ProgressEvent,
   type RenderReportInput,
 } from "./orchestrator/orchestrator.js";
+export {
+  gatherTaskSchema,
+  orchestratorRequestSchema,
+  reportSpecSchema,
+  toOrchestratorRequest,
+  type OrchestratorRequestInput,
+} from "./orchestrator/request.js";
 export { renderMarkdownReport } from "./orchestrator/report.js";
 export {
   createOrchestrator,
@@ -131,6 +138,13 @@ export {
   type WriteDecision,
   type WriteTask,
 } from "./orchestrator/write-gate.js";
+export {
+  createSandy,
+  type Sandy,
+  type SandyCheckReport,
+  type SandyDeps,
+} from "./sandy.js";
+export { CLI_NAME, EXIT, runCli } from "./cli.js";
 export { resolveRetryPolicy, withRetry, DEFAULT_RETRY } from "./mcp/retry.js";
 export {
   McpCallError,

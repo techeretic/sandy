@@ -109,6 +109,20 @@ export class ManagedServer {
       await client.connect(transport);
     } catch (err) {
       this.setHealth("unreachable", `connect failed: ${err instanceof Error ? err.message : String(err)}`);
+      // A failed connect can leave the transport holding OS handles — a
+      // spawned stdio child process, or an in-flight SSE/streamable-HTTP
+      // socket. Release it so the process can exit and no child is orphaned
+      // (a terminal failure is also a *clean* one, MCP-10).
+      try {
+        await transport.close();
+      } catch {
+        // transport may already be torn down
+      }
+      try {
+        await client.close();
+      } catch {
+        // client never fully connected
+      }
       throw err;
     }
 

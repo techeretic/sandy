@@ -97,3 +97,25 @@
 - Next: plugin interface (Claude Code / Codex) + the CLI/service entry point that composes config → enforcer → MCP manager → orchestrator.
 - Committed as `42db211` and pushed.
 - **Session paused.** Wrote `docs/NEXT_STEPS.md` — a self-contained resume point: status, what's already built (do not rebuild), remaining work in order (CLI/service entry point → Claude Code/Codex plugin → egress + sandbox conformance → model-engine seam), conventions to keep, and the suggested first action for the next session.
+
+## 2026-08-18
+
+### CLI / service entry point (NEXT_STEPS item 1)
+
+Resumed from `docs/NEXT_STEPS.md`. Built the composition layer that turns the finished modules into a runnable `sandy` binary — the spine the plugin (item 2) and the conformance test (item 3) attach to.
+
+- **`src/sandy.ts`** — `createSandy(deps)`: the startup sequence, wired in dependency order:
+  1. `loadSandyConfig` (fail-closed, CP-04)
+  2. `SandboxEnforcer.create` — refuses unsandboxed / runtime mismatch (throws); a *degraded* sandbox state is **not** thrown, it's audited (`sandbox_violation`) and surfaced via `check()`
+  3. `JsonlAuditLogger` (when `auditFile` given) or `InMemoryAuditLogger` → derives `mcpAuditSink` + `fileAuditSink`
+  4. `McpClientManager` + `NetworkGuard(allowed_network)` → `connectAll()`; startup failures are recorded, not fatal
+  5. `FileManager` over `enforcer.paths`
+  6. `createOrchestrator` (concurrency from `preferences.max_concurrent_mcp_calls`)
+  `Sandy.check()` returns a serializable capability/health report; `Sandy.run()` executes an `OrchestratorRequest`; `Sandy.close()` closes MCP + flushes the audit log. Injectable `transportFactory`/`detection`/`probe`/`confinement` keep it testable.
+- **`src/orchestrator/request.ts`** — `orchestratorRequestSchema` (Zod) + `toOrchestratorRequest`: the wire format for requests. Owned by the library so the CLI validates request files and the plugin (item 2) validates tool bodies with the **same** rules.
+- **`src/cli.ts`** — `runCli(argv)`: verbs `check` (validate config + print capability/health report) and `run <request.json>` (execute a request, print claims/gaps, write the report). Flags: `-c/--config` (default `$SANDY_CONFIG` or `./sandy.json`), `-o/--audit` (JSONL path; default in-memory), `--json` (clean machine-readable stdout), `--no-progress`. Progress streams to **stderr** so `--json` stdout stays pipeable. Stable exit codes: `0` ok, `1` error, `2` usage, `3` config (fail-closed), `4` sandbox violation.
+- **`bin/sandy.js`** + `package.json` `bin` entry. Also exportable: `createSandy`/`Sandy`/`runCli`/`EXIT`/request schema from `src/index.ts`.
+- **Bug fixed in `src/mcp/managed-server.ts`:** on a failed `client.connect()`, the transport was never closed — a failed **stdio** connect leaked its spawned child process (and a failed SSE/streamable-HTTP connect could hold a socket), so the Node process **hung** on exit. `sandy check` against the example config would never return. Now the transport + client are torn down on connect failure. This is a production-relevant fix (terminal failures are now *clean* ones, MCP-10), and it's what made the process exit promptly.
+- **`tests/sandy.test.ts`** (11 new tests) + **`tests/fixtures/stdio-mcp-server.mjs`** (a real stdio MCP server spawned by the CLI for the strongest e2e). Covers: healthy composition + `check()`; end-to-end `run()` (claim provenance, confined report write, JSONL audit mirroring); startup-failed server reported as `server-unavailable` (never thrown, never hidden); fail-closed unsandboxed (`SandboxViolationError`) and missing config (`ConfigError`); CLI exit codes (healthy check `--json`, real-stdio `run`, missing config → 3, invalid request → 2, unknown verb → 2, `--help` → 0).
+- **Verified by hand:** `node bin/sandy.js check --json` (healthy, `ok:true`) and `run` (streaming progress on stderr, provenance claim, report written to the confined `reports/` dir, JSONL audit with `session_start/mcp_call/orchestrator_task/file_mutation/session_end`) against a real stdio MCP subprocess. **105/105 pass** (was 94), typecheck + build green.
+- Next: item 2 — the Claude Code / Codex plugin (expose `sandy.gather`/`report`/`files.*`/`status` as host-side tools over `createSandy`), then item 3 — the egress conformance test.
