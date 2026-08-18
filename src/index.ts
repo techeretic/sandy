@@ -145,6 +145,40 @@ export {
   type SandyDeps,
 } from "./sandy.js";
 export { CLI_NAME, EXIT, runCli } from "./cli.js";
+export {
+  SandyPluginAPI,
+  ToolInputError,
+} from "./plugin/api.js";
+export {
+  ProgressCollector,
+  SessionCache,
+  type PluginSession,
+  type SandyPluginOptions,
+} from "./plugin/state.js";
+export {
+  createSandyMcpServer,
+  startSandyMcpServer,
+  type SandyMcpServerOptions,
+} from "./plugin/mcp-server.js";
+export {
+  filesDeleteInput,
+  filesListInput,
+  filesMkdirInput,
+  filesReadInput,
+  filesRenameInput,
+  filesWriteInput,
+  fileOpFlagsShape,
+  gatherTaskShape,
+  gatherToolInput,
+  reportToolInput,
+  statusToolInput,
+  type FilesListResult,
+  type FilesMutateResult,
+  type FilesReadResult,
+  type GatherToolResult,
+  type ReportToolResult,
+  type StatusToolResult,
+} from "./plugin/tools.js";
 export { resolveRetryPolicy, withRetry, DEFAULT_RETRY } from "./mcp/retry.js";
 export {
   McpCallError,

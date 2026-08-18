@@ -1,0 +1,107 @@
+import path from "node:path";
+import {
+  createSandy,
+  type Sandy,
+  type SandyDeps,
+} from "../sandy.js";
+import type { ProgressEvent } from "../orchestrator/orchestrator.js";
+
+/**
+ * A live plugin session: one {@link Sandy} bound to one `sandy.json`, plus a
+ * progress collector. A host (Claude Code / Codex) makes many tool calls in a
+ * row, so the plugin reuses one Sandy per config instead of re-running the
+ * startup sequence (sandbox detection, every MCP connect) per call.
+ */
+export interface PluginSession {
+  sandy: Sandy;
+  /** The resolved config path this session is bound to. */
+  configPath: string;
+  progress: ProgressCollector;
+}
+
+/**
+ * Options for starting a plugin. Mirrors the CLI/composition options minus the
+ * config path and the progress sink (progress is always collected in-band by
+ * the plugin and returned on the result, since a host usually only surfaces
+ * the final tool result, not a streamed terminal).
+ */
+export interface SandyPluginOptions extends Omit<SandyDeps, "sandyPath" | "onProgress"> {
+  env?: SandyDeps["env"];
+}
+
+/**
+ * Collects streaming progress events (Q4) as short strings. The plugin resets
+ * it before a run and drains it after, so `sandy.gather` / `sandy.report` can
+ * return the events in-band. Safe because a host invokes tools sequentially.
+ */
+export class ProgressCollector {
+  private events: string[] = [];
+
+  /** The sink to hand to the orchestrator. */
+  readonly sink: (e: ProgressEvent) => void = (e) => {
+    this.events.push(describeProgress(e));
+  };
+
+  reset(): void {
+    this.events = [];
+  }
+
+  /** Take and clear the collected events. */
+  drain(): string[] {
+    const out = this.events;
+    this.events = [];
+    return out;
+  }
+}
+
+function describeProgress(e: ProgressEvent): string {
+  switch (e.type) {
+    case "task-started":
+      return `${e.task}: ${e.server}/${e.tool}`;
+    case "task-succeeded":
+      return `${e.task} ok (${e.durationMs}ms)`;
+    case "task-failed":
+      return `${e.task} failed: ${e.error}`;
+    case "report-writing":
+      return `writing report → ${e.path}`;
+    case "done":
+      return `done: ${e.claims} claim(s), ${e.gaps} gap(s)`;
+  }
+}
+
+/**
+ * Cache of {@link PluginSession}s keyed by resolved config path. Lets a host
+ * call many tools without restarting Sandy. Tests pass `new Map()` semantics
+ * implicitly by creating a fresh plugin per test.
+ */
+export class SessionCache {
+  private readonly sessions = new Map<string, PluginSession>();
+
+  constructor(private readonly options: SandyPluginOptions) {}
+
+  get size(): number {
+    return this.sessions.size;
+  }
+
+  async get(configPath: string): Promise<PluginSession> {
+    const resolved = path.resolve(configPath);
+    const existing = this.sessions.get(resolved);
+    if (existing) return existing;
+
+    const progress = new ProgressCollector();
+    const sandy = await createSandy({
+      ...this.options,
+      sandyPath: resolved,
+      onProgress: progress.sink,
+    });
+    const session: PluginSession = { sandy, configPath: resolved, progress };
+    this.sessions.set(resolved, session);
+    return session;
+  }
+
+  async closeAll(): Promise<void> {
+    const sessions = [...this.sessions.values()];
+    this.sessions.clear();
+    await Promise.all(sessions.map((s) => s.sandy.close()));
+  }
+}

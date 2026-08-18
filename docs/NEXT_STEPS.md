@@ -4,7 +4,7 @@ _Last updated 2026-08-18. Read this together with `docs/DIARY.md` (chronological
 
 ## Status
 
-The **core library is built, tested, and now composed into a runnable `sandy` binary** (105/105 tests, typecheck + build green). `sandy check` and `sandy run <request.json>` work end-to-end against a real MCP server (see item 1 below — done). The remaining work is the Phase 1 flagship deliverable (the Claude Code / Codex plugin) + the launch conformance gate.
+The **core library is built, tested, composed into a runnable `sandy` binary, and wired into a Claude Code / Codex plugin** (112/112 tests, typecheck + build green). The Phase 1 flagship is now in place: the host LLM reasons, and Sandy executes the nine `sandy.*` host-side tools inside the sandbox. The remaining launch work is the conformance gate (egress + sandbox, items 3/4).
 
 Commits so far (oldest → newest):
 - `fa61dc5` config layer (Zod schemas + fail-closed loader)
@@ -12,7 +12,8 @@ Commits so far (oldest → newest):
 - `d02371e` MCP Client Manager
 - `7e2609a` File Manager
 - `42db211` Audit Logger + Orchestrator
-- (uncommitted) CLI / service entry point: `src/sandy.ts` + `src/cli.ts` + `bin` + `src/orchestrator/request.ts`
+- `9da1bd0` CLI / service entry point: `src/sandy.ts` + `src/cli.ts` + `bin` + `src/orchestrator/request.ts`
+- (uncommitted) Claude Code / Codex plugin: `src/plugin/` + `plugin/` manifest + install
 
 ## What's built (do not rebuild)
 
@@ -26,6 +27,7 @@ Commits so far (oldest → newest):
 | Orchestrator | `src/orchestrator/` | bounded fan-out, provenance claims, explicit gaps, Markdown report renderer, progress events, write-gate contract (ReadOnlyGate); `request.ts` Zod request schema (shared CLI/plugin) |
 | Sandy (composition) | `src/sandy.ts` | `createSandy(deps)` startup factory: config → enforcer → audit → MCP → files → orchestrator; `check()` report, `run()`, `close()`. Injectable transport/detection for tests |
 | CLI | `src/cli.ts`, `bin/sandy.js` | `sandy check` + `sandy run <request.json>`; `--json`/`--no-progress`/`-c`/`-o`; stable exit codes (0 ok / 1 error / 2 usage / 3 config / 4 sandbox) |
+| Plugin (host tools) | `src/plugin/` | `tools.ts` (Zod tool-surface contract), `state.ts` (`PluginSession`/`SessionCache`/`ProgressCollector`), `api.ts` (`SandyPluginAPI` — validate → delegate → shape, confirmation flow, structured errors), `mcp-server.ts` (MCP stdio server exposing 9 `sandy.*` tools). `plugin/.claude-plugin/plugin.json` + `plugin/install.sh` (manual install, Q3) |
 
 Everything is exported from `src/index.ts`. Tests live in `tests/` (use `tests/helpers/mcp.ts` for in-process MCP servers).
 
@@ -39,16 +41,15 @@ Composed the modules into a runnable `sandy` binary (the spine the plugin attach
 - **Fixed a real leak:** `ManagedServer` now closes the transport on a failed connect (a failed stdio connect was orphaning its child process and hanging the process on exit).
 - Verified end-to-end against a real stdio MCP subprocess: `check --json` reports healthy; `run` streams progress, returns a provenance claim, writes the report to the confined `reports/` dir, and persists a JSONL audit.
 
-### 2. Claude Code / Codex plugin (PL-01..PL-04) — the Phase 1 flagship
-- **Key design decision to lock first:** the plugin's tool surface. In plugin mode the *host* LLM does the reasoning (PL-03); Sandy exposes sandboxed capabilities the host can call. Recommended: expose Sandy as a small set of host-side tools:
-  - `sandy.gather` (body = `OrchestratorRequest.gather`) → returns claims + gaps + progress
-  - `sandy.report` (body = `OrchestratorRequest.report`) → renders + writes, returns path + content
-  - `sandy.files.read|list|write|delete|mkdir|rename` (thin wrappers over `FileManager`)
-  - `sandy.status` (capability report + MCP health + failed servers)
-- The host LLM decides which tools to call and composes the narrative `summary`; Sandy returns provenance + gaps so the host can cite and disclose them.
-- Install per Q3: git repo + manual install (a `plugin/` dir + a `sandy.plugin.json` / `.claude-plugin/plugin.json` manifest + install script). No registry dependency.
-- Register capabilities with the host (PL-02). Plugin name "Sandy" (PL-04).
-- **Open question to resolve:** how the plugin hands back `ProgressEvent`s for Q4 streaming within the host's UI (host may only surface final tool results).
+### 2. Claude Code / Codex plugin (PL-01..PL-04) — DONE (2026-08-18)
+The Phase 1 flagship. The host LLM does the reasoning (PL-03); Sandy is exposed as a small set of host-side tools over MCP (registered with the host, PL-02; named "Sandy", PL-04). See `docs/DIARY.md` 2026-08-18 for the full write-up. Delivered:
+- `src/plugin/tools.ts` — the tool-surface contract (Zod schemas + result types): `sandy.gather`, `sandy.report`, `sandy.status`, `sandy.files.read|list|write|delete|mkdir|rename`.
+- `src/plugin/state.ts` — `PluginSession`/`SessionCache` (one Sandy per config, reused across a host's many tool calls) + `ProgressCollector` (Q4 progress returned in-band).
+- `src/plugin/api.ts` — `SandyPluginAPI`: validates each body (field-level `ToolInputError`), delegates to the composed Sandy, shapes results. Confirmation-gated file ops return `needsConfirmation` (never auto-confirm, FM-04); every file op reports errors as a structured result, never throws to the host.
+- `src/plugin/mcp-server.ts` — MCP stdio server registering the nine `sandy.*` tools; entry point `node dist/plugin/mcp-server.js <sandy.json>`.
+- `plugin/.claude-plugin/plugin.json` + `plugin/install.sh` — manual install per Q3 (no registry); `package.json` `files` ships `dist`/`bin`/`plugin`.
+- Verified: real MCP stdio handshake lists all nine tools and `sandy.status` reports healthy; **112/112 tests** (was 105).
+- **Open (deferred):** how the host surfaces `ProgressEvent`s in its UI — collected in-band now; a host that only shows final results sees them on the result object.
 
 ### 3. Egress conformance test (launch success criterion)
 Automate "zero network egress outside declared MCP endpoints" (verifiable at the network level) in **at least Docker + Firejail** (SB-09; PRD §11/§12).
@@ -79,4 +80,4 @@ Confirm `sandy check`/`run` behave identically under Docker and Firejail (the en
 - Update `docs/DIARY.md` per work block; keep `README.md` Status section current.
 
 ## Suggested first action for the next session
-Start **item 2 (Claude Code / Codex plugin)**: the Phase 1 flagship. Build `plugin/` on top of `createSandy` — expose the host-side tools (`sandy.gather`, `sandy.report`, `sandy.files.*`, `sandy.status`), a `sandy.plugin.json`/`.claude-plugin/plugin.json` manifest, and an install script (git repo + manual install, no registry). Reuse `src/orchestrator/request.ts` to validate tool bodies. The CLI (item 1) is the reference for how the modules compose and how progress/reports surface.
+Start **item 3 (egress conformance test)**: the launch success criterion — prove "zero network egress outside declared MCP endpoints" at the network level in ≥ Docker + Firejail (SB-09). The plugin and CLI are both done and attach to the same `createSandy` spine, so this is the remaining gate before launch.

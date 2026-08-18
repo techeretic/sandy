@@ -12,6 +12,12 @@
   "bin": {
     "sandy": "bin/sandy.js"
   },
+  "files": [
+    "dist",
+    "bin",
+    "plugin",
+    "README.md"
+  ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

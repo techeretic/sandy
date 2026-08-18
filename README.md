@@ -52,6 +52,25 @@ User (CLI / Claude Code / Codex)
 - **Least privilege** — only accesses explicitly configured paths, network endpoints, and MCP servers.
 - **Auditable** — structured, append-only audit log for every operation.
 
+## Using Sandy
+
+**Prereq:** build once — `npm ci && npm run build`. Then run from **inside a sandbox** (Sandy refuses to start without a boundary).
+
+**CLI:**
+```bash
+node bin/sandy.js check  --config config/sandy.json     # validate config + capability/health report
+node bin/sandy.js run <request.json> --config config/sandy.json   # gather → provenance-tracked report
+# add --json for machine-readable output, --audit <path> to persist the JSONL log
+```
+
+**Plugin (Claude Code / Codex):** the host LLM does the reasoning; it calls the `sandy.*` tools over MCP.
+```bash
+./plugin/install.sh --dir <your-host-plugin-dir>   # manual install (no registry)
+# The plugin declares 'sandy' as a stdio MCP server (plugin/.claude-plugin/plugin.json)
+# and reads 'sandy.json' from the working directory (or $SANDY_CONFIG).
+```
+Host tools exposed: `sandy.gather`, `sandy.report`, `sandy.status`, and `sandy.files.read|list|write|delete|mkdir|rename`.
+
 ## Documentation
 
 | Document | Description |
@@ -71,9 +90,10 @@ Phase 1 in progress. Delivered so far:
 - File Manager (`src/files/`): confined file/directory CRUD (FM-01/02/03), policy-gated confirmations (FM-04), undo journal with subtree snapshots (FM-05), dry-run (FM-06), ignore patterns (FM-07), and format-aware write validation for text/CSV/JSON/Markdown (FM-08).
 - Audit + Orchestrator (`src/audit/`, `src/orchestrator/`): structured append-only audit log with opt-in payload logging and JSONL persistence (AU-01/02), session transcript export (AU-03), multi-source fan-out with bounded concurrency (RG-01), provenance-tracked claims with a deterministic Markdown report and explicit gaps — never fabricated filler (RG-02/04/05/06), streaming progress events (Q4), and the write-approval gate contract for future write-back (Q6).
 - **CLI / service entry point** (`src/sandy.ts`, `src/cli.ts`, `bin/sandy.js`): a runnable `sandy` binary that composes all of the above. `sandy check` validates config and prints the capability/health report; `sandy run <request.json>` executes an orchestrator request (gather → provenance-tracked report) with `--json` and streaming progress. Fail-closed startup (refuses unsandboxed / runtime mismatch); stable exit codes for CI.
-- Example configs in `config/`, test suite (`npm test`) — 105 tests passing
+- **Claude Code / Codex plugin** (`src/plugin/`, `plugin/`) — the Phase 1 flagship (PL-01..PL-04). The host LLM does the reasoning; Sandy is exposed as nine host-side tools over MCP — `sandy.gather`, `sandy.report`, `sandy.status`, and `sandy.files.read|list|write|delete|mkdir|rename` — all executing inside the sandbox. Bodies are schema-validated, confirmation-gated file ops return `needsConfirmation` (never auto-confirmed), and every op reports structured results. Ships as a Claude Code MCP plugin with a `.claude-plugin/plugin.json` manifest + manual install script (no registry).
+- Example configs in `config/`, test suite (`npm test`) — 112 tests passing
 
-Next: Claude Code / Codex plugin (Phase 1 flagship) + egress conformance test.
+Next: egress conformance test (launch success criterion) + sandbox conformance matrix.
 
 ## License
 
