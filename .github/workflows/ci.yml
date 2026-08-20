@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Concurrent matrix legs and the identity job share a build; keep one at a time
+# per ref to avoid racing the Docker image build + firejail install.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Non-sandbox gate: always runs, no Docker/Firejail needed.
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+      # In-process conformance (no Docker needed) runs here too.
+      - run: npm run test:conformance
+
+  # The SB-09/10 runtime-agnosticity matrix: the SAME config + request run under
+  # Docker and under Firejail. Each leg is self-contained and fail-closed
+  # (SANDY_REQUIRE=1) and uploads its behavior signature for the identity job.
+  conformance:
+    needs: core
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        boundary: [docker, firejail]
+    env:
+      SANDY_MATRIX: ${{ matrix.boundary }}
+      SANDY_REQUIRE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Install firejail
+        if: matrix.boundary == 'firejail'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends firejail
+      - name: Run sandbox conformance (${{ matrix.boundary }})
+        run: bash conformance/sandbox-matrix.sh
+      - name: Upload behavior signature
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-sig-${{ matrix.boundary }}
+          path: /tmp/sandy-matrix-sigs/${{ matrix.boundary }}.sig
+
+  # Proves the matrix legs behave identically: download both boundaries'
+  # signatures and require them to be byte-identical. This is the CI-level form
+  # of the in-script cross-boundary assertion (which runs when both boundaries
+  # are present in one process, e.g. locally).
+  identity:
+    needs: conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sandbox-sig-docker
+          path: sigs/docker
+      - uses: actions/download-artifact@v4
+        with:
+          name: sandbox-sig-firejail
+          path: sigs/firejail
+      - name: Assert identical behavior across boundaries
+        run: |
+          diff -u sigs/docker/docker.sig sigs/firejail/firejail.sig
+          echo "Docker and Firejail produce identical behavior — enforcer is runtime-agnostic (SB-10)"

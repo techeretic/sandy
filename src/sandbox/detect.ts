@@ -54,7 +54,17 @@ function inGvisor(ctx: DetectionContext): boolean {
 }
 
 function inFirejail(ctx: DetectionContext): boolean {
-  return ctx.env["FIREJAIL"] === "1" || ctx.fileExists("/.firejail");
+  // Real firejail sets `container=firejail` (it does NOT set FIREJAIL=1 or
+  // create /.firejail in all builds). Keep the FIREJAIL env + /.firejail
+  // marker checks too: some builds/launch flags set those instead. Order here
+  // matters — a firejail jail ON a Docker host must report firejail, so this
+  // is checked before inDocker (whose cgroup/mountinfo heuristics would
+  // otherwise win off the inherited host signals).
+  return (
+    ctx.env["FIREJAIL"] === "1" ||
+    ctx.env["container"] === "firejail" ||
+    ctx.fileExists("/.firejail")
+  );
 }
 
 function inDocker(ctx: DetectionContext): boolean {

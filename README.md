@@ -71,11 +71,12 @@ node bin/sandy.js run <request.json> --config config/sandy.json   # gather → p
 ```
 Host tools exposed: `sandy.gather`, `sandy.report`, `sandy.status`, and `sandy.files.read|list|write|delete|mkdir|rename`.
 
-**Conformance (the egress guarantee):**
+**Conformance (the egress + runtime-agnostic guarantees):**
 ```bash
-npm run conformance          # in-process + Docker network-level proof
+npm run conformance          # in-process + Docker egress + Docker/Firejail sandbox matrix
 npm run test:conformance     # in-process only (no Docker needed)
-npm run conformance:docker   # build + Docker network-level proof
+npm run conformance:docker   # Docker network-level egress proof
+npm run conformance:sandbox  # Docker + Firejail sandbox matrix (identical-behavior proof)
 ```
 
 ## Documentation
@@ -99,9 +100,10 @@ Phase 1 in progress. Delivered so far:
 - **CLI / service entry point** (`src/sandy.ts`, `src/cli.ts`, `bin/sandy.js`): a runnable `sandy` binary that composes all of the above. `sandy check` validates config and prints the capability/health report; `sandy run <request.json>` executes an orchestrator request (gather → provenance-tracked report) with `--json` and streaming progress. Fail-closed startup (refuses unsandboxed / runtime mismatch); stable exit codes for CI.
 - **Claude Code / Codex plugin** (`src/plugin/`, `plugin/`) — the Phase 1 flagship (PL-01..PL-04). The host LLM does the reasoning; Sandy is exposed as nine host-side tools over MCP — `sandy.gather`, `sandy.report`, `sandy.status`, and `sandy.files.read|list|write|delete|mkdir|rename` — all executing inside the sandbox. Bodies are schema-validated, confirmation-gated file ops return `needsConfirmation` (never auto-confirmed), and every op reports structured results. Ships as a Claude Code MCP plugin with a `.claude-plugin/plugin.json` manifest + manual install script (no registry).
 - **Egress conformance** (`conformance/`) — the launch success criterion (SB-09). Proves "zero network egress outside declared MCP endpoints" in-process (every dialed URL is the declared endpoint; blocks are refused pre-dial and audited as `egress_blocked`) **and** at the network level in Docker (a `--internal` network boundary; the run succeeds against the one declared endpoint, an external-egress probe is blocked, and an undeclared endpoint fails closed). Run with `npm run conformance`.
-- Example configs in `config/`, test suite (`npm test`) — 117 tests passing
+- **Sandbox conformance matrix** (`conformance/sandbox-matrix.sh`, `signature.mjs`) — proves the enforcer is **runtime-agnostic** (SB-10): the same config + request run under Docker and under Firejail produce **byte-identical behavior** (capability decision, egress allowlist, MCP fleet outcome, and provenance). Runs in a CI matrix (`.github/workflows/ci.yml`). Along the way it fixed a real detection bug: real firejail sets `container=firejail`, which the detector now recognizes (a firejail jail on a Docker host reports firejail, not the inherited docker).
+- Example configs in `config/`, test suite (`npm test`) — 121 tests passing
 
-Next: sandbox conformance matrix (Docker + Firejail in CI, item 4) — the egress Docker harness is the template.
+Next: model-engine wiring (item 5, plugin mode) — feed the host's token counts into the audit log. Standalone + bundled LLM is Phase 2 (a clean `LlmEngine` seam is left in place).
 
 ## License
 

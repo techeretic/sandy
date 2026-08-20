@@ -1,10 +1,10 @@
 # Next Steps — Resume Point
 
-_Last updated 2026-08-18. Read this together with `docs/DIARY.md` (chronological log) and `docs/DECISIONS.md` (resolved open questions)._
+_Last updated 2026-08-20. Read this together with `docs/DIARY.md` (chronological log) and `docs/DECISIONS.md` (resolved open questions)._
 
 ## Status
 
-The **core library is built, tested, composed into a runnable `sandy` binary, wired into a Claude Code / Codex plugin, and the egress conformance gate now passes** (117/117 tests + conformance, typecheck + build green). The Phase 1 flagship is in place and the launch success criterion — "zero network egress outside declared MCP endpoints" — is proven both in-process and at the network level in Docker. Remaining: the sandbox conformance matrix (item 4, Docker + Firejail in CI).
+The **core library is built, tested, composed into a runnable `sandy` binary, wired into a Claude Code / Codex plugin, and BOTH conformance gates now pass** (121/121 tests + conformance, typecheck + build green). The Phase 1 flagship is in place. The launch success criterion — "zero network egress outside declared MCP endpoints" — is proven in-process and at the network level in Docker, **and the enforcer is proven runtime-agnostic**: the same config + request run under Docker and under Firejail produce byte-identical behavior (the SB-09/10 conformance matrix now runs in CI). Remaining Phase 1 work: model-engine wiring (item 5, plugin mode only — feed the host's token counts into the audit log).
 
 Commits so far (oldest → newest):
 - `fa61dc5` config layer (Zod schemas + fail-closed loader)
@@ -14,7 +14,8 @@ Commits so far (oldest → newest):
 - `42db211` Audit Logger + Orchestrator
 - `9da1bd0` CLI / service entry point
 - `17cdb8b` Claude Code / Codex plugin (`src/plugin/` + `plugin/`)
-- (uncommitted) egress conformance test: `conformance/` (+ `egress_blocked` audit wiring)
+- `8dd9c14` egress conformance test: `conformance/` (+ `egress_blocked` audit wiring)
+- (this session) sandbox conformance matrix: `conformance/sandbox-matrix.sh` + `signature.mjs` + `stdio-server.mjs`, `.github/workflows/ci.yml`, and the `inFirejail` detection fix
 
 ## What's built (do not rebuild)
 
@@ -29,6 +30,7 @@ Commits so far (oldest → newest):
 | Sandy (composition) | `src/sandy.ts` | `createSandy(deps)` startup factory: config → enforcer → audit → MCP → files → orchestrator; `check()` report, `run()`, `close()`. Injectable transport/detection for tests |
 | CLI | `src/cli.ts`, `bin/sandy.js` | `sandy check` + `sandy run <request.json>`; `--json`/`--no-progress`/`-c`/`-o`; stable exit codes (0 ok / 1 error / 2 usage / 3 config / 4 sandbox) |
 | Plugin (host tools) | `src/plugin/` | `tools.ts` (Zod tool-surface contract), `state.ts` (`PluginSession`/`SessionCache`/`ProgressCollector`), `api.ts` (`SandyPluginAPI` — validate → delegate → shape, confirmation flow, structured errors), `mcp-server.ts` (MCP stdio server exposing 9 `sandy.*` tools). `plugin/.claude-plugin/plugin.json` + `plugin/install.sh` (manual install, Q3) |
+| Conformance | `conformance/` | `egress.test.ts` (in-process) + `run-docker.sh`/`ep-server.mjs` (Docker network-level egress) + `sandbox-matrix.sh`/`signature.mjs`/`stdio-server.mjs` (Docker + Firejail runtime-agnosticity matrix, SB-10) + `Dockerfile` (shared image). CI: `.github/workflows/ci.yml` |
 
 Everything is exported from `src/index.ts`. Tests live in `tests/` (use `tests/helpers/mcp.ts` for in-process MCP servers).
 
@@ -58,8 +60,15 @@ Proved "zero network egress outside declared MCP endpoints" (SB-09; PRD §11/§1
 - **Network-level, Docker** (`conformance/run-docker.sh` + `Dockerfile`): a Docker `--internal` network gives the sandbox a runtime-enforced zero-external-egress boundary. The declared endpoint is an EP container (logs each hit); asserts `sandy run` succeeds + the EP is hit, an external-egress probe is BLOCKED, and an undeclared endpoint fails closed (VPN-02) with nothing leaving.
 - Wired: `npm run conformance` (in-process + Docker). **Firejail** is the same harness with the boundary command swapped (enforcer is runtime-agnostic) — see item 4, since firejail isn't installed in this environment.
 
-### 4. Sandbox conformance (SB-09/10)
-Confirm `sandy check`/`run` behave identically under Docker and Firejail (the enforcer is runtime-agnostic; this proves it). Add a smoke matrix to CI. The egress Docker harness (`conformance/run-docker.sh`) is the template; extend it to run the same assertions under firejail and add both to a CI matrix.
+### 4. Sandbox conformance (SB-09/10) — DONE (2026-08-20)
+Proved the enforcer is runtime-agnostic: the same config + request under Docker and Firejail produce **byte-identical behavior**. See `docs/DIARY.md` 2026-08-20. Delivered:
+- **Detection fix (a real bug the matrix surfaced):** real firejail sets `container=firejail` (not `FIREJAIL=1` / `/.firejail`), which the detector missed — so a firejail jail on a Docker host was mis-detected and a `firejail` config was wrongly refused. `inFirejail` now recognizes the real signal and is checked before docker (nested jails report the inner boundary). +4 tests incl. the nested case.
+- **`conformance/sandbox-matrix.sh`** — runs the same `sandy check`+`run` under both boundaries (Docker `--network none`, Firejail `--net=none` non-root) and asserts each is healthy + the two boundaries' **behavior signatures are byte-identical**. Modes: `SANDY_MATRIX=docker|firejail` (one leg) or both + cross-check; `SANDY_REQUIRE=1` fails closed on a missing boundary (CI), else it skips.
+- **`conformance/signature.mjs`** — the runtime-agnostic projection (capability decision, egress allowlist, MCP fleet, provenance `argsHash`); deliberately excludes runtime-specific fields (detected runtime + evidence, absolute paths, timestamps, durations).
+- **`conformance/stdio-server.mjs`** — stdio MCP fixture (no network, so the matrix isolates boundary behavior from egress).
+- **`.github/workflows/ci.yml`** — `core` (typecheck/build/test + in-process conformance) → `conformance` matrix (docker + firejail, fail-closed, upload signature) → `identity` (download both, require byte-identical).
+- **Scripts:** `npm run conformance` now includes the sandbox matrix; `conformance:sandbox` / `:docker` / `:firejail` for single legs.
+- **Verified locally with both boundaries present:** both conform, signatures identical, skip/require paths correct, egress harness still green. **121/121 tests** (was 117).
 
 ### 5. Model engine wiring (depends on mode)
 - **Plugin mode:** no bundled model needed — the host LLM is the engine. Only need the `logModelInvocation` hook fed from the host (token counts) if the host exposes them.
@@ -81,4 +90,4 @@ Confirm `sandy check`/`run` behave identically under Docker and Firejail (the en
 - Update `docs/DIARY.md` per work block; keep `README.md` Status section current.
 
 ## Suggested first action for the next session
-Start **item 3 (egress conformance test)**: the launch success criterion — prove "zero network egress outside declared MCP endpoints" at the network level in ≥ Docker + Firejail (SB-09). The plugin and CLI are both done and attach to the same `createSandy` spine, so this is the remaining gate before launch.
+Start **item 5 (model-engine wiring), plugin mode only**: feed the host's token counts into `logModelInvocation` (AU) when the host exposes them, so model usage lands in the audit trail. Standalone/bundled-LLM is Phase 2 — leave a clean `LlmEngine` seam. Both conformance gates (egress + sandbox) are done, so Phase 1 is functionally complete once this hook is wired.

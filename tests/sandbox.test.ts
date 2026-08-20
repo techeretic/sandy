@@ -44,8 +44,34 @@ describe("detectRuntime", () => {
     ...over,
   });
 
-  it("detects firejail via env", () => {
+  it("detects firejail via the FIREJAIL env", () => {
     expect(detectRuntime(ctx({ env: { FIREJAIL: "1" } })).runtime).toBe("firejail");
+  });
+
+  it("detects firejail via container=firejail (the signal real firejail sets)", () => {
+    expect(detectRuntime(ctx({ env: { container: "firejail" } })).runtime).toBe("firejail");
+  });
+
+  it("detects firejail via the /.firejail marker", () => {
+    expect(detectRuntime(ctx({ fileExists: (p) => p === "/.firejail" })).runtime).toBe("firejail");
+  });
+
+  it("prefers firejail over the inherited host docker signals (nested jail)", () => {
+    // A firejail jail on a Docker host inherits docker cgroup/mountinfo; the
+    // inner boundary must win.
+    const env = { container: "firejail" };
+    const readFileSync = (p: string) =>
+      p === "/proc/1/cgroup"
+        ? "0::/docker/abcd1234\n"
+        : p === "/proc/self/mountinfo"
+          ? "overlay / docker\n"
+          : "";
+    const fileExists = (p: string) => p === "/.dockerenv";
+    expect(detectRuntime(ctx({ env, readFileSync, fileExists })).runtime).toBe("firejail");
+  });
+
+  it("does not mistake an unrelated container runtime for firejail", () => {
+    expect(detectRuntime(ctx({ env: { container: "lxc" } })).runtime).toBe("none");
   });
 
   it("detects docker via /.dockerenv", () => {
