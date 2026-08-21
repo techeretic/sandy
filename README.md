@@ -86,6 +86,7 @@ npm run conformance:sandbox  # Docker + Firejail sandbox matrix (identical-behav
 | [PRD Final](docs/PRD_Final.md) | Merged, authoritative product requirements document |
 | [PRD Original](docs/PRD.md) | Initial product requirements document |
 | [PRD Claude](docs/PRD_Claude.md) | Claude-contributed product requirements |
+| [Phase 2 Design](docs/PHASE2_DESIGN.md) | Standalone service + bundled LLM (SD-01..06) — architecture, model backend, local API, open decisions |
 
 ## Status
 

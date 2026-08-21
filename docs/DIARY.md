@@ -189,3 +189,15 @@ The last Phase 1 work block. The PRD names "LLM Engine" as a core component ("ei
 - **Tests (+5):** `sandy.test.ts` — `createSandy` exposes a host engine that records into the audit log and whose `invoke()` throws a clear error; `createLlmEngine` builds `host` and fails closed for `local`/`remote`. `plugin.test.ts` — `sandy.model.usage` records into the audit log + returns a receipt, no payload by default; error outcome + body-with-no-token-counts rejection. The MCP-surface test's tool list grew 9 → 10.
 - **Verified end-to-end:** drove `dist/plugin/mcp-server.js` over a real stdio JSON-RPC handshake — all 10 tools listed (incl. `sandy.model.usage`) and a `sandy.model.usage` call returned `{recorded: true, seq: 1, provider: "claude-code", inputTokens: 500, outputTokens: 120}`. **126/126 tests** (was 121, +5), typecheck + build green.
 - **Phase 1 is now functionally complete.** Remaining is Phase 2 (SD-*): a standalone service with a bundled 4–8B model behind `LlmEngine.invoke()` + the local API. The seam, audit logging, and fail-closed factory are in place for it.
+- Committed `c1cfcc7` and pushed.
+
+### Phase 2 design (planning) — 2026-08-20
+
+Wrote `docs/PHASE2_DESIGN.md` (an ADR) for the standalone service + bundled LLM (SD-01..SD-06), since Phase 2 has real architecture choices worth agreeing on before building. Core decisions it makes:
+- **Same runtime spine as plugin mode, plus two new components** (an autonomous parse→run→narrate loop, and a loopback-only local API). The deterministic core (MCP/files/sandbox/audit/orchestrator/report) is unchanged — that's what makes SD-06 (tool/file parity) and the no-egress + cross-sandbox guarantees hold by construction, and it reuses the existing conformance harnesses for a standalone config.
+- **Model backend: llama.cpp driven as a subprocess (`llama-server`)** behind the existing `LlmEngine` seam (`src/engine.ts`) — no native build in our dep tree, model crash can't take down the service, GPU/CPU accel is llama.cpp's job, and SD-04 swappability falls out (a `RemoteEngine` is the same HTTP client pointed elsewhere). A `StubEngine` makes the whole standalone path CI-runnable with no model/GPU.
+- **Local API: loopback-only REST** (refused off-loopback) alongside the existing CLI; surface maps 1:1 onto existing primitives, request body validated by the same `orchestratorRequestSchema`.
+- **Service lifecycle:** a `sandy serve` verb, graceful shutdown, model health surfaced via `check()`.
+- The model output is **validated against the request schema** (the model proposes, the schema disposes) — that's the SD-05 compensation that keeps a weak 4–8B model within policy, and provenance is unaffected because claims still come from MCP, not the model.
+- **Open decisions (§7)** flagged for approval before build: model/runtime distribution (leaning docs-based, `model_path` in config), default model pick, exact additive `llm` config field names, REST surface scope, and whether `llama-server` runs inside the same sandbox (leaning yes).
+- No code written yet — this is the plan. Next session: resolve §7, then build per §8 (LlmEngine local backend first).
