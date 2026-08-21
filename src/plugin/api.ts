@@ -21,12 +21,14 @@ import {
   filesRenameInput,
   filesWriteInput,
   gatherToolInput,
+  modelUsageInput,
   reportToolInput,
   statusToolInput,
   type FilesListResult,
   type FilesMutateResult,
   type FilesReadResult,
   type GatherToolResult,
+  type ModelUsageToolResult,
   type ReportToolResult,
   type StatusToolResult,
 } from "./tools.js";
@@ -120,6 +122,35 @@ export class SandyPluginAPI {
   status(_input: unknown): StatusToolResult {
     validate("sandy.status", statusToolInput, _input);
     return this.session.sandy.check();
+  }
+
+  /**
+   * `sandy.model.usage` — the host LLM (the engine, PL-03) reports its own model
+   * usage so it lands in the audit trail (AU-01). Records the invocation and
+   * returns the audit `seq` as a receipt. Metadata only: prompt/completion are
+   * payloads (AU-02) and are not part of this tool's surface.
+   */
+  modelUsage(input: unknown): ModelUsageToolResult {
+    const body = validate("sandy.model.usage", modelUsageInput, input);
+    // An error in the body implies an error outcome unless one was given.
+    const outcome = body.outcome ?? (body.error !== undefined ? "error" : "ok");
+    const event = this.session.sandy.engine.record({
+      ...(body.provider !== undefined ? { provider: body.provider } : {}),
+      ...(body.model !== undefined ? { model: body.model } : {}),
+      ...(body.inputTokens !== undefined ? { inputTokens: body.inputTokens } : {}),
+      ...(body.outputTokens !== undefined ? { outputTokens: body.outputTokens } : {}),
+      ...(body.durationMs !== undefined ? { durationMs: body.durationMs } : {}),
+      outcome,
+      ...(body.error !== undefined ? { error: body.error } : {}),
+    });
+    return {
+      recorded: true,
+      seq: event.seq,
+      provider: (event.data["provider"] as string) ?? "host",
+      ...(body.inputTokens !== undefined ? { inputTokens: body.inputTokens } : {}),
+      ...(body.outputTokens !== undefined ? { outputTokens: body.outputTokens } : {}),
+      outcome,
+    };
   }
 
   // --- files ---------------------------------------------------------------

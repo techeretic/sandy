@@ -67,6 +67,52 @@ export const statusToolInput = z.object({}).strict();
 /** Reuses the CLI capability/health report — one source of truth. */
 export type StatusToolResult = SandyCheckReport;
 
+// --- sandy.model.usage -----------------------------------------------------
+
+/**
+ * In plugin mode the HOST LLM is the engine (PL-03). This tool is how the host
+ * reports its own model usage back to Sandy so it lands in the audit trail
+ * (AU-01: "every model invocation with token counts"). The host is the one that
+ * knows its token counts; Sandy records them. Metadata only — prompt/completion
+ * are payloads (AU-02, opt-in) and are deliberately NOT part of the tool surface.
+ */
+export const modelUsageShape = {
+  provider: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Model provider label, e.g. 'claude-code'. Defaults to 'host'."),
+  model: z.string().min(1).optional().describe("Model name/id, when the host exposes it"),
+  inputTokens: z.number().int().nonnegative().optional(),
+  outputTokens: z.number().int().nonnegative().optional(),
+  durationMs: z.number().int().nonnegative().optional(),
+  /** Defaults to "error" when an `error` is present, else "ok". */
+  outcome: z.enum(["ok", "error"]).optional(),
+  error: z.string().min(1).optional(),
+} as const;
+
+export const modelUsageInput = z
+  .object(modelUsageShape)
+  .strict()
+  .refine(
+    (b) =>
+      b.inputTokens !== undefined ||
+      b.outputTokens !== undefined ||
+      b.error !== undefined,
+    { message: "report at least one token count, or an error" },
+  );
+
+/** A receipt that the host's model usage was recorded in the audit log. */
+export interface ModelUsageToolResult {
+  recorded: true;
+  /** Audit event sequence number — the receipt that the invocation was logged. */
+  seq: number;
+  provider: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  outcome: "ok" | "error";
+}
+
 // --- sandy.files.* ---------------------------------------------------------
 
 export const fileOpFlagsShape = {

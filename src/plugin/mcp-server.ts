@@ -9,6 +9,7 @@ import {
   filesRenameInput,
   filesWriteInput,
   gatherToolInput,
+  modelUsageShape,
   reportToolInput,
   statusToolInput,
 } from "./tools.js";
@@ -82,6 +83,17 @@ export function createSandyMcpServer(options: SandyMcpServerOptions): McpServer 
       inputSchema: statusToolInput.shape,
     },
     wrap((args) => api.status(args)),
+  );
+
+  server.registerTool(
+    "sandy.model.usage",
+    {
+      description:
+        "Report this host LLM's own model usage (token counts) so it is recorded in Sandy's audit log (AU-01). " +
+        "The host is the engine (PL-03); call this after a turn to log its model invocation. Returns the audit seq.",
+      inputSchema: modelUsageShape,
+    },
+    wrap((args) => api.modelUsage(args)),
   );
 
   server.registerTool(

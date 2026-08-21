@@ -171,6 +171,73 @@ describe("SandyPluginAPI: status (PL-02)", () => {
   });
 });
 
+describe("SandyPluginAPI: model usage (AU-01, PL-03)", () => {
+  it("records host-reported model usage into the audit log and returns a receipt", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, [ws]);
+    const { api, session, close } = await makeSession(cfg);
+    try {
+      // The engine is the host engine (plugin mode).
+      expect(session.sandy.engine.provider).toBe("host");
+
+      const receipt = api.modelUsage({
+        provider: "claude-code",
+        model: "claude-sonnet",
+        inputTokens: 120,
+        outputTokens: 34,
+        durationMs: 812,
+      });
+      expect(receipt.recorded).toBe(true);
+      expect(receipt.provider).toBe("claude-code");
+      expect(receipt.inputTokens).toBe(120);
+      expect(receipt.outputTokens).toBe(34);
+      expect(receipt.outcome).toBe("ok");
+      expect(receipt.seq).toBeGreaterThanOrEqual(1);
+
+      const invocations = session.sandy.audit
+        .events()
+        .filter((e) => e.type === "model_invocation");
+      expect(invocations).toHaveLength(1);
+      const data = invocations[0]!.data as Record<string, unknown>;
+      expect(data["provider"]).toBe("claude-code");
+      expect(data["model"]).toBe("claude-sonnet");
+      expect(data["inputTokens"]).toBe(120);
+      expect(data["outputTokens"]).toBe(34);
+      expect(data["outcome"]).toBe("ok");
+      // Default: no payload is logged (AU-02).
+      expect(invocations[0]!.payload).toBeUndefined();
+    } finally {
+      await close();
+    }
+  });
+
+  it("records an error outcome and rejects a body with no token counts", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, [ws]);
+    const { api, session, close } = await makeSession(cfg);
+    try {
+      const receipt = api.modelUsage({ error: "context overflow", inputTokens: 10 });
+      expect(receipt.outcome).toBe("error");
+      const invocations = session.sandy.audit
+        .events()
+        .filter((e) => e.type === "model_invocation");
+      expect((invocations[invocations.length - 1]!.data as Record<string, unknown>)["error"]).toBe(
+        "context overflow",
+      );
+
+      // A body with no token counts and no error is rejected with a field-level error.
+      try {
+        api.modelUsage({ provider: "x" });
+        expect.unreachable("should have thrown");
+      } catch (err) {
+        expect(err).toBeInstanceOf(ToolInputError);
+      }
+    } finally {
+      await close();
+    }
+  });
+});
+
 describe("SandyPluginAPI: files (FM, confined)", () => {
   it("writes a new file, reads it back, lists it, renames, and deletes (with confirmation)", async () => {
     const ws = await tmpWorkspace();
@@ -242,6 +309,7 @@ describe("createSandyMcpServer: MCP surface (PL-01/PL-02)", () => {
           "sandy.files.rename",
           "sandy.files.write",
           "sandy.gather",
+          "sandy.model.usage",
           "sandy.report",
           "sandy.status",
         ].sort(),

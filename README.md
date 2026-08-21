@@ -69,7 +69,7 @@ node bin/sandy.js run <request.json> --config config/sandy.json   # gather → p
 # The plugin declares 'sandy' as a stdio MCP server (plugin/.claude-plugin/plugin.json)
 # and reads 'sandy.json' from the working directory (or $SANDY_CONFIG).
 ```
-Host tools exposed: `sandy.gather`, `sandy.report`, `sandy.status`, and `sandy.files.read|list|write|delete|mkdir|rename`.
+Host tools exposed: `sandy.gather`, `sandy.report`, `sandy.status`, `sandy.model.usage`, and `sandy.files.read|list|write|delete|mkdir|rename`.
 
 **Conformance (the egress + runtime-agnostic guarantees):**
 ```bash
@@ -98,12 +98,13 @@ Phase 1 in progress. Delivered so far:
 - File Manager (`src/files/`): confined file/directory CRUD (FM-01/02/03), policy-gated confirmations (FM-04), undo journal with subtree snapshots (FM-05), dry-run (FM-06), ignore patterns (FM-07), and format-aware write validation for text/CSV/JSON/Markdown (FM-08).
 - Audit + Orchestrator (`src/audit/`, `src/orchestrator/`): structured append-only audit log with opt-in payload logging and JSONL persistence (AU-01/02), session transcript export (AU-03), multi-source fan-out with bounded concurrency (RG-01), provenance-tracked claims with a deterministic Markdown report and explicit gaps — never fabricated filler (RG-02/04/05/06), streaming progress events (Q4), and the write-approval gate contract for future write-back (Q6).
 - **CLI / service entry point** (`src/sandy.ts`, `src/cli.ts`, `bin/sandy.js`): a runnable `sandy` binary that composes all of the above. `sandy check` validates config and prints the capability/health report; `sandy run <request.json>` executes an orchestrator request (gather → provenance-tracked report) with `--json` and streaming progress. Fail-closed startup (refuses unsandboxed / runtime mismatch); stable exit codes for CI.
-- **Claude Code / Codex plugin** (`src/plugin/`, `plugin/`) — the Phase 1 flagship (PL-01..PL-04). The host LLM does the reasoning; Sandy is exposed as nine host-side tools over MCP — `sandy.gather`, `sandy.report`, `sandy.status`, and `sandy.files.read|list|write|delete|mkdir|rename` — all executing inside the sandbox. Bodies are schema-validated, confirmation-gated file ops return `needsConfirmation` (never auto-confirmed), and every op reports structured results. Ships as a Claude Code MCP plugin with a `.claude-plugin/plugin.json` manifest + manual install script (no registry).
+- **Claude Code / Codex plugin** (`src/plugin/`, `plugin/`) — the Phase 1 flagship (PL-01..PL-04). The host LLM does the reasoning; Sandy is exposed as ten host-side tools over MCP — `sandy.gather`, `sandy.report`, `sandy.status`, `sandy.model.usage`, and `sandy.files.read|list|write|delete|mkdir|rename` — all executing inside the sandbox. Bodies are schema-validated, confirmation-gated file ops return `needsConfirmation` (never auto-confirmed), and every op reports structured results. `sandy.model.usage` lets the host (the engine) report its token usage into the audit trail (AU-01). Ships as a Claude Code MCP plugin with a `.claude-plugin/plugin.json` manifest + manual install script (no registry).
 - **Egress conformance** (`conformance/`) — the launch success criterion (SB-09). Proves "zero network egress outside declared MCP endpoints" in-process (every dialed URL is the declared endpoint; blocks are refused pre-dial and audited as `egress_blocked`) **and** at the network level in Docker (a `--internal` network boundary; the run succeeds against the one declared endpoint, an external-egress probe is blocked, and an undeclared endpoint fails closed). Run with `npm run conformance`.
 - **Sandbox conformance matrix** (`conformance/sandbox-matrix.sh`, `signature.mjs`) — proves the enforcer is **runtime-agnostic** (SB-10): the same config + request run under Docker and under Firejail produce **byte-identical behavior** (capability decision, egress allowlist, MCP fleet outcome, and provenance). Runs in a CI matrix (`.github/workflows/ci.yml`). Along the way it fixed a real detection bug: real firejail sets `container=firejail`, which the detector now recognizes (a firejail jail on a Docker host reports firejail, not the inherited docker).
-- Example configs in `config/`, test suite (`npm test`) — 121 tests passing
+- **LLM Engine seam** (`src/engine.ts`) — the reasoning layer (PRD §7). In plugin mode the **host LLM is the engine** (`HostLlmEngine`): it records the host-reported token usage into the audit log (AU-01) via the `sandy.model.usage` tool, and never invokes a model itself. The `LlmEngine` interface is the fixed seam a Phase 2 bundled/remote model (SD-02/04) drops in behind; `createLlmEngine` fails closed for `local`/`remote` until then.
+- Example configs in `config/`, test suite (`npm test`) — 126 tests passing
 
-Next: model-engine wiring (item 5, plugin mode) — feed the host's token counts into the audit log. Standalone + bundled LLM is Phase 2 (a clean `LlmEngine` seam is left in place).
+Next: Phase 2 — standalone service + bundled LLM behind the `LlmEngine` seam (SD-*). Phase 1 is functionally complete: CLI, plugin, egress conformance, and the sandbox conformance matrix all pass.
 
 ## License
 

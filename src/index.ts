@@ -144,6 +144,14 @@ export {
   type SandyCheckReport,
   type SandyDeps,
 } from "./sandy.js";
+export {
+  createLlmEngine,
+  HostLlmEngine,
+  type LlmEngine,
+  type ModelRequest,
+  type ModelResult,
+  type ModelUsage,
+} from "./engine.js";
 export { CLI_NAME, EXIT, runCli } from "./cli.js";
 export {
   SandyPluginAPI,
@@ -170,12 +178,15 @@ export {
   fileOpFlagsShape,
   gatherTaskShape,
   gatherToolInput,
+  modelUsageInput,
+  modelUsageShape,
   reportToolInput,
   statusToolInput,
   type FilesListResult,
   type FilesMutateResult,
   type FilesReadResult,
   type GatherToolResult,
+  type ModelUsageToolResult,
   type ReportToolResult,
   type StatusToolResult,
 } from "./plugin/tools.js";

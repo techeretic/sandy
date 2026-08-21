@@ -24,6 +24,7 @@ import { FileManager } from "./files/file-manager.js";
 import type { MutationJournal } from "./files/journal.js";
 import { createOrchestrator } from "./orchestrator/factory.js";
 import type { Orchestrator } from "./orchestrator/orchestrator.js";
+import { createLlmEngine, type LlmEngine } from "./engine.js";
 import type {
   OrchestratorRequest,
   OrchestratorResult,
@@ -56,6 +57,8 @@ export interface SandyDeps {
   probe?: SandboxEnforcerOptions["probe"];
   /** Injectable path-confinement knobs (tests). */
   confinement?: SandboxEnforcerOptions["confinement"];
+  /** Injectable LLM engine (tests / Phase 2). Default: from config's llm provider. */
+  engine?: LlmEngine;
   /** MCP retry policy overrides. */
   retry?: Partial<RetryPolicy>;
   /** Per-request MCP timeout (ms). */
@@ -117,6 +120,8 @@ export interface Sandy {
   loaded: LoadedConfig;
   enforcer: SandboxEnforcer;
   audit: AuditLogger;
+  /** The reasoning layer (PRD §7). Host engine in plugin mode; bundled in Phase 2. */
+  engine: LlmEngine;
   manager: McpClientManager;
   files: FileManager;
   orchestrator: Orchestrator;
@@ -168,6 +173,10 @@ export async function createSandy(deps: SandyDeps): Promise<Sandy> {
     });
   }
 
+  // 3b. Reasoning layer (PRD §7). Host engine in plugin mode; a bundled/remote
+  //     engine (Phase 2, SD-02/04) drops in behind the same LlmEngine seam.
+  const engine = deps.engine ?? createLlmEngine(loaded.config.llm, audit);
+
   const mcpSink = mcpAuditSink(audit);
   const fileSink = fileAuditSink(audit);
 
@@ -206,6 +215,7 @@ export async function createSandy(deps: SandyDeps): Promise<Sandy> {
     loaded,
     enforcer,
     audit,
+    engine,
     manager,
     files,
     orchestrator,

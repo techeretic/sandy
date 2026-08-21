@@ -6,9 +6,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   ConfigError,
   SandboxViolationError,
+  createLlmEngine,
   createSandy,
   runCli,
   EXIT,
+  InMemoryAuditLogger,
+  type LlmConfig,
   type Sandy,
 } from "../src/index.js";
 import {
@@ -121,6 +124,37 @@ describe("createSandy: composition (CLI/service spine)", () => {
     }
   });
 
+  it("exposes a host LLM engine that records model usage into the audit log (AU-01)", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, { allowedPaths: [ws] });
+    const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }]);
+    inMemServers.push(crm);
+
+    const sandy = await createSandy({
+      sandyPath: cfg,
+      transportFactory: () => crm.transport,
+    });
+    try {
+      // Plugin mode (llm.provider "host") → the host engine.
+      expect(sandy.engine.provider).toBe("host");
+
+      const event = sandy.engine.record({
+        provider: "claude-code",
+        model: "claude-sonnet",
+        inputTokens: 100,
+        outputTokens: 20,
+      });
+      expect(event.type).toBe("model_invocation");
+      expect(sandy.audit.events().some((e) => e.seq === event.seq)).toBe(true);
+
+      // The bundled/remote engines are a Phase 2 seam: host engine does not
+      // invoke a model itself (it throws a clear error, not a silent no-op).
+      await expect(sandy.engine.invoke({ prompt: "hi" })).rejects.toThrow(/HOST LLM is the engine/);
+    } finally {
+      await closeAll([sandy]);
+    }
+  });
+
   it("runs a request end-to-end: gathers, writes a confined report, and audits", async () => {
     const ws = await tmpWorkspace();
     const cfg = await writeConfig(ws, { allowedPaths: [ws] });
@@ -219,6 +253,27 @@ describe("createSandy: fail-closed contract", () => {
     await expect(createSandy({ sandyPath: path.join(ws, "does-not-exist.json") })).rejects.toThrow(
       ConfigError,
     );
+  });
+});
+
+describe("createLlmEngine: reasoning-layer seam (PRD §7, AU-01, SD-02/04)", () => {
+  const audit = () => new InMemoryAuditLogger();
+
+  it("builds the host engine for llm.provider 'host' (plugin mode)", () => {
+    const engine = createLlmEngine({ provider: "host" } as LlmConfig, audit());
+    expect(engine.provider).toBe("host");
+    const event = engine.record({ inputTokens: 5, outputTokens: 6 });
+    expect(event.type).toBe("model_invocation");
+    expect((event.data as Record<string, unknown>)["provider"]).toBe("host");
+  });
+
+  it("fails closed for 'local' (bundled model, Phase 2) and 'remote' (Phase 2)", () => {
+    expect(() => createLlmEngine({ provider: "local", model: "llama-7b" } as LlmConfig, audit())).toThrow(
+      /Phase 2/,
+    );
+    expect(() =>
+      createLlmEngine({ provider: "remote", endpoint: "http://x" } as LlmConfig, audit()),
+    ).toThrow(/Phase 2/);
   });
 });
 
