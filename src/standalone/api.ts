@@ -343,6 +343,12 @@ export class LocalApi {
       "x-accel-buffering": "no",
     });
     res.write(": connected\n\n");
+    // A late subscriber still gets a consistent stream: the `running` marker
+    // and the progress accumulated so far are replayed before the stream goes
+    // live. This is race-free because route() pushes to job.progress and
+    // writes to live subscribers in one synchronous step, so each line is
+    // delivered exactly once no matter when the client connects.
+    if (job.startedAt !== undefined) writeSse(res, { type: "running" });
     if (isTerminal(job.status)) {
       // Already finished: replay the progress, then the terminal event.
       for (const line of job.progress) writeSse(res, { type: "progress", text: line });
@@ -350,6 +356,7 @@ export class LocalApi {
       res.end();
       return;
     }
+    for (const line of job.progress) writeSse(res, { type: "progress", text: line });
     job.sse.add(res);
     // When the client disconnects, drop the subscription.
     res.on("close", () => job.sse.delete(res));
