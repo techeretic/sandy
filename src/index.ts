@@ -168,6 +168,17 @@ export {
   type LoopResult,
   type ToolRef,
 } from "./standalone/loop.js";
+export {
+  ApiError,
+  BoundedJobStore,
+  LocalApi,
+  LoopbackBindError,
+  createLocalApi,
+  type Job,
+  type JobKind,
+  type JobStatus,
+  type LocalApiOptions,
+} from "./standalone/api.js";
 export { CLI_NAME, EXIT, runCli } from "./cli.js";
 export {
   SandyPluginAPI,

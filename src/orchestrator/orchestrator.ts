@@ -149,7 +149,9 @@ export class Orchestrator {
   private readonly manager: McpClientManager;
   private readonly audit: AuditLogger;
   private readonly concurrency: number;
-  private readonly onProgress: (event: ProgressEvent) => void;
+  /** Swappable (see {@link setProgressSink}) so a long-lived host can redirect
+   *  per-job progress in-band. */
+  private onProgress: (event: ProgressEvent) => void;
   private readonly renderReport: (input: RenderReportInput) => string;
   private readonly writeReport: ((content: string, file: string) => Promise<string>) | null;
 
@@ -160,6 +162,20 @@ export class Orchestrator {
     this.onProgress = options.onProgress ?? (() => {});
     this.renderReport = options.renderReport ?? renderMarkdownReport;
     this.writeReport = options.writeReport ?? null;
+  }
+
+  /** The current progress sink (Q4). */
+  getProgressSink(): (event: ProgressEvent) => void {
+    return this.onProgress;
+  }
+
+  /**
+   * Swap the progress sink. Lets a long-lived host (the service's job worker)
+   * redirect per-job progress in-band — the same pattern the plugin uses with
+   * its `ProgressCollector` — and restore the previous sink when done.
+   */
+  setProgressSink(sink: (event: ProgressEvent) => void): void {
+    this.onProgress = sink;
   }
 
   async run(request: OrchestratorRequest): Promise<OrchestratorResult> {

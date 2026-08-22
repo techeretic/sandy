@@ -142,7 +142,9 @@ export class AutonomousLoop {
   private readonly files: FileManager;
   private readonly reportDir: string;
   private readonly tools: readonly ToolRef[];
-  private readonly onProgress: (event: ProgressEvent) => void;
+  /** Swappable (see {@link setProgressSink}) so a service's job worker can
+   *  redirect per-job progress in-band. */
+  private onProgress: (event: ProgressEvent) => void;
   private readonly maxAttempts: number;
   private readonly narrateEnabled: boolean;
 
@@ -156,6 +158,16 @@ export class AutonomousLoop {
     this.onProgress = options.onProgress ?? (() => {});
     this.maxAttempts = Math.max(1, options.maxParseAttempts ?? 3);
     this.narrateEnabled = options.narrative ?? true;
+  }
+
+  /** The current progress sink (Q4). */
+  getProgressSink(): (event: ProgressEvent) => void {
+    return this.onProgress;
+  }
+
+  /** Swap the progress sink (a service's job worker redirects per-job progress). */
+  setProgressSink(sink: (event: ProgressEvent) => void): void {
+    this.onProgress = sink;
   }
 
   /** The legal tool catalog, as `server/tool` strings (for prompts). */

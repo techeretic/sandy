@@ -5,7 +5,7 @@ proven. This document designs Phase 2 and surfaces the decisions that need
 sign-off before building. Read with `docs/PRD_Final.md` §6.6 (Mode B) and §7,
 `docs/DECISIONS.md`, and `docs/NEXT_STEPS.md`._
 
-_**Implementation status (2026-08-22):** §8 build order **steps 1–3 are done** —
+_**Implementation status (2026-08-22):** §8 build order **steps 1–5 are done** —
 the `LlmEngine` lifecycle contract, `LlamaCppEngine`/`RemoteEngine`/`StubEngine`,
 the additive `llm` config fields (`model_path`, `engine` knobs, loopback
 constraint), `ModelRequest`'s structured-output knobs (open #6, implemented as
@@ -16,10 +16,20 @@ model, and the **autonomous loop** (`src/standalone/loop.ts`, §2.1): bounded
 fallback, refuse-and-report), unchanged orchestrator run, optional clearly-
 labeled narrate — wired in as `Sandy.loop` / `sandy ask "<goal>"`, with its own
 audit events (`standalone_parse`/`standalone_plan`/`standalone_narrate`) and a
-fail-closed `NoModelEngineError` against the host engine. 150/150 tests, no
-model or GPU required. Remaining: §8 steps 4–6 (local API + `sandy serve`,
-service lifecycle, standalone conformance). See `docs/DIARY.md` 2026-08-21 and
-2026-08-22._
+fail-closed `NoModelEngineError` against the host engine. **Steps 4–5
+(2026-08-22):** the **loopback-only local API** (`src/standalone/api.ts`, §5) —
+plain `node:http` over the composed `Sandy`, bound to `127.0.0.1` only (off-
+loopback refused fail-closed), `GET /health`/`/reports`/`/audit`, `POST
+/run`/`/ask` → `202`+id, `GET /jobs/:id`, SSE `GET /jobs/:id/events`, a
+**bounded** job store (max pending → `429`, completed retention with oldest-
+evicted → clean `404`), and a **serial** worker that redirects per-job progress
+in-band (the plugin's `ProgressCollector` pattern). Plus the **service
+lifecycle** (§6) — the `sandy serve` verb: eager `engine.start()`, graceful
+SIGINT/SIGTERM shutdown (close the API, let the in-flight job finish, reap the
+model, close MCP, flush audit); a dead model is a reported `degraded` state,
+not a crash. 163/163 tests, no model or GPU required. Remaining: §8 step 6
+(standalone conformance — parameterize the harness config templates). See
+`docs/DIARY.md` 2026-08-21 and 2026-08-22._
 
 _**Review note (2026-08-20):** the first draft was reviewed against the actual
 code. One of the review's concerns turned out to be based on a false premise and
@@ -140,8 +150,8 @@ Key properties:
 | `LlmEngine` (`src/engine.ts`) | **Extend** | implement `invoke()` for a local backend **and** add a lifecycle contract (start/close/health, §4.2); extend `ModelRequest` for structured output; `createLlmEngine` already fails closed for `local`/`remote` until then |
 | `SandyCheckReport` (`src/sandy.ts`) | **Extend** | add an `engine` health field (loaded/ready/dead + reason) so `sandy check` surfaces model health |
 | **Autonomous loop** | **Done (2026-08-22)** | `src/standalone/loop.ts`: parse → run → narrate, bounded + validated + deterministic fallback; `Sandy.loop` / `sandy ask` |
-| **Local API** | **NEW** | `src/standalone/api.ts` (proposed): loopback-only REST, bounded job store |
-| **Service lifecycle** | **NEW** | `src/standalone/service.ts` + `sandy serve` CLI verb (proposed) |
+| **Local API** | **Done (2026-08-22)** | `src/standalone/api.ts`: loopback-only REST (off-loopback refused), bounded job store, serial worker, SSE progress |
+| **Service lifecycle** | **Done (2026-08-22)** | `sandy serve` CLI verb (`runServe` in `src/cli.ts`): eager engine start, graceful SIGINT/SIGTERM shutdown |
 | Model runtime | **NEW** | llama.cpp (see §4) |
 
 ## 4. The bundled model (SD-02, SD-04)
@@ -357,6 +367,32 @@ service adds a REST surface for a UI / other local tools.
 - **Engine start timing** → lazy by default; eager on `sandy serve` (§6).
 - **Parse robustness** → bounded retry + deterministic fallback (§2.1).
 
+**Implemented (2026-08-22, §8 steps 4–5):**
+- **Local API (SD-03)** → built: `src/standalone/api.ts` (`LocalApi`,
+  `BoundedJobStore`, `createLocalApi`). Plain `node:http` (no framework) over the
+  composed `Sandy`. **Loopback-only**: binds `127.0.0.1`/`localhost`/`::1`; any
+  other host is refused fail-closed by `LoopbackBindError` before a socket opens
+  (the ingress-side half of the no-exposure guarantee). Surface maps 1:1 onto
+  existing primitives: `GET /health` → `check()`, `POST /run` (validated by the
+  same `orchestratorRequestSchema`) and `POST /ask` → `202` + job id, `GET
+  /jobs/:id` → status/result (clean `404` when evicted), `GET /reports` (confined
+  dir), `GET /audit` (transcript, AU-03), SSE `GET /jobs/:id/events` (Q4
+  progress). The job store is **bounded** — a max pending (`429` when full) and a
+  completed retention that evicts the oldest finished job (so a long-lived
+  process can't grow without limit; §5). A **serial** worker runs one job at a
+  time (the composed `Sandy` has one progress sink; this mirrors the plugin's
+  sequential `ProgressCollector`), redirecting the orchestrator's **and** loop's
+  progress to the active job in-band + over SSE, then restoring the prior sink.
+  `close()` stops the server, lets the in-flight job finish, and releases the port.
+- **Service lifecycle (SD-01)** → built: `sandy serve` (`runServe` in
+  `src/cli.ts`): config → enforcer → audit → **eager `engine.start()`** (a
+  service wants a ready model) → MCP → API, then long-lived until SIGINT/SIGTERM.
+  Graceful shutdown closes the API (letting the in-flight job finish), then
+  `Sandy.close()` reaps the model, closes MCP, and flushes the audit — in that
+  order, so nothing is orphaned. Engine start stays **lazy** for `check`/`run`/
+  `ask` (a `sandy check` never forces a model load); a dead model is a reported
+  `degraded` state in `/health`, never a crash (§6).
+
 **Implemented (2026-08-22, §8 step 3):**
 - **Autonomous loop** → built: `src/standalone/loop.ts` (`AutonomousLoop`), the
   §2.1 parse → run → narrate. Parse is bounded (default 3 attempts, the error
@@ -396,9 +432,12 @@ service adds a REST surface for a UI / other local tools.
 3. **Resource-limit enforcement scope (§4.5).** Map caps to llama.cpp knobs now
     and let the supervisor enforce the hard ceiling (leaning), or implement the
     in-service hard bound in v2?
-4. **REST vs CLI emphasis.** Both ship; confirm the REST surface list in §5 is
-    the right scope for v2 (vs. CLI-only + REST later). Leaning: ship both, REST
-    is thin.
+
+**Resolved by implementation (2026-08-22):**
+- **#5 (old) REST vs CLI emphasis** → both ship, as the design leaned: the CLI
+  (`check`/`run`/`ask`/`serve`) stays the primary local interface and the REST
+  surface in §5 is thin and shipped 1:1 (`/health`, `/run`, `/ask`, `/jobs/:id`,
+  `/jobs/:id/events`, `/reports`, `/audit`).
 
 **Resolved by implementation (2026-08-21, no longer open):**
 - **#4 (old) Exact additive `llm` config fields** → shipped as §4.4 sketches
@@ -427,10 +466,19 @@ service adds a REST surface for a UI / other local tools.
     report. Wired in as `Sandy.loop` / `sandy ask "<goal>"`; a dead model
     degrades (fallback / no narrative), never crashes; fails closed against the
     host engine. Unit-tested with a scripted in-process engine (no model/GPU).
-4. **Local API** — loopback-only REST over the composed Sandy, bounded job
-    store (§5) + `sandy serve` verb.
-5. **Service lifecycle** — lazy/eager engine start (§6), graceful shutdown
-   (engine.close), model health in `check()`.
+4. **Local API** — ~~loopback-only REST over the composed Sandy, bounded job
+    store (§5) + `sandy serve` verb.~~ **DONE (2026-08-22)** —
+    `src/standalone/api.ts`: `node:http` bound to `127.0.0.1` only (off-loopback
+    refused), `GET /health`/`/reports`/`/audit`, `POST /run`/`/ask` → `202`+id,
+    `GET /jobs/:id`, SSE `GET /jobs/:id/events`; **bounded** `BoundedJobStore`
+    (max pending → `429`, completed retention + oldest-evicted → `404`); a
+    **serial** worker redirects the orchestrator's + loop's progress per job.
+5. **Service lifecycle** — ~~lazy/eager engine start (§6), graceful shutdown
+    (engine.close), model health in `check()`.~~ **DONE (2026-08-22)** —
+    `sandy serve` verb: eager `engine.start()`, graceful SIGINT/SIGTERM shutdown
+    (API → in-flight job → `engine.close()` → MCP → audit flush); engine start
+    stays **lazy** for `check`/`run`/`ask`; a dead model is a reported `degraded`
+    state, never a crash.
 6. **Conformance for standalone** — **parameterize** the existing egress +
    sandbox matrix config templates (mode + `llm` provider/model) and run them
    against a standalone config (proves parity/egress hold, incl. the in-sandbox

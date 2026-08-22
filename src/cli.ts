@@ -8,6 +8,7 @@ import { orchestratorRequestSchema, toOrchestratorRequest } from "./orchestrator
 import { createSandy, type Sandy, type SandyCheckReport } from "./sandy.js";
 import type { OrchestratorResult, ProgressEvent } from "./orchestrator/orchestrator.js";
 import { NoModelEngineError, type LoopResult } from "./standalone/loop.js";
+import { createLocalApi } from "./standalone/api.js";
 
 export const CLI_NAME = "sandy";
 
@@ -28,9 +29,10 @@ export const EXIT = {
 } as const;
 
 interface ParsedArgs {
-  verb?: "check" | "run" | "ask";
+  verb?: "check" | "run" | "ask" | "serve";
   requestFile?: string;
   goal?: string;
+  port?: number;
   configPath?: string;
   auditFile?: string;
   json: boolean;
@@ -84,6 +86,17 @@ function parseArgs(argv: string[]): ParsedArgs {
         i = (r.next ?? i + 1) - 1;
         break;
       }
+      case "--port": {
+        const r = takeValue(a, argv, i);
+        if (r.error) return { ...out, error: r.error };
+        const n = Number(r.value);
+        if (!Number.isInteger(n) || n < 0 || n > 65535) {
+          return { ...out, error: "--port must be an integer between 0 and 65535 (0 = pick a free one)" };
+        }
+        out.port = n;
+        i = (r.next ?? i + 1) - 1;
+        break;
+      }
       default:
         if (a.startsWith("-") && a !== "-") return { ...out, error: `unknown option: ${a}` };
         positional.push(a);
@@ -93,8 +106,11 @@ function parseArgs(argv: string[]): ParsedArgs {
     return { ...out, error: "missing verb (expected `check` or `run`)" };
   }
   const verb = positional[0];
-  if (verb !== "check" && verb !== "run" && verb !== "ask") {
-    return { ...out, error: `unknown verb: ${verb} (expected '${CLI_NAME} check', '${CLI_NAME} run', or '${CLI_NAME} ask')` };
+  if (verb !== "check" && verb !== "run" && verb !== "ask" && verb !== "serve") {
+    return {
+      ...out,
+      error: `unknown verb: ${verb} (expected '${CLI_NAME} check', '${CLI_NAME} run', '${CLI_NAME} ask', or '${CLI_NAME} serve')`,
+    };
   }
   out.verb = verb;
   if (positional.length > 1) {
@@ -125,10 +141,12 @@ usage:
   ${CLI_NAME} check [options]              validate config + print capability/health report
   ${CLI_NAME} run <request.json> [options] run an orchestrator request (gather → report)
   ${CLI_NAME} ask "<goal>" [options]       ask the bundled model to plan + run + narrate (standalone)
+  ${CLI_NAME} serve [options]              run the standalone service (loopback API + ready model)
 
 options:
   -c, --config <path>    path to sandy.json (default: $SANDY_CONFIG or ./sandy.json)
   -o, --audit <path>     write the append-only JSONL audit log to <path> (default: in-memory)
+      --port <n>         loopback port for serve (0 = pick a free one; default 0)
       --json             print machine-readable JSON on stdout
       --no-progress      disable streaming progress on stderr
   -h, --help             show this help
@@ -312,6 +330,62 @@ async function withSandy<T>(
   }
 }
 
+/**
+ * `sandy serve` (design §6): the long-lived standalone service. Starts the
+ * composed Sandy, EAGERLY starts the model (a service wants a ready model for
+ * the API), binds the loopback-only API, and runs until SIGINT/SIGTERM.
+ *
+ * Graceful shutdown closes the API, lets any in-flight job finish, reaps the
+ * model process, closes MCP, and flushes the audit — in that order, so nothing
+ * is orphaned. A dead model is reported via /health, not a crash.
+ */
+async function runServe(args: ParsedArgs): Promise<number> {
+  const sandyPath = resolveConfigPath(args.configPath);
+  const sink = progressSink(args.progress);
+  const sandy = await createSandy({
+    sandyPath,
+    auditFile: args.auditFile,
+    onProgress: sink,
+  });
+  // Eager engine start (§6): a service wants a ready model up-front.
+  try {
+    await sandy.engine.start();
+  } catch (err) {
+    await sandy.close();
+    throw err;
+  }
+  const api = createLocalApi(sandy, { port: args.port ?? 0 });
+  await api.start();
+
+  const report = sandy.check();
+  process.stderr.write(
+    `sandy: serving on http://${api.boundHost}:${api.boundPort} (loopback-only)\n` +
+      `sandy: engine ${report.engine.status}${report.engine.error ? ` (${report.engine.error})` : ""}; ` +
+      `${report.mcp.connected.length} MCP server(s) connected\n`,
+  );
+
+  // Long-lived: run until a termination signal. Clean shutdown is idempotent.
+  await new Promise<void>((resolve) => {
+    let done = false;
+    const finish = (signal: NodeJS.Signals): void => {
+      if (done) return;
+      done = true;
+      process.stderr.write(`\nsandy: received ${signal}, shutting down\n`);
+      void (async () => {
+        try {
+          await api.close();
+        } finally {
+          await sandy.close();
+        }
+        resolve();
+      })();
+    };
+    process.on("SIGINT", () => finish("SIGINT"));
+    process.on("SIGTERM", () => finish("SIGTERM"));
+  });
+  return EXIT.ok;
+}
+
 function translateError(err: unknown): RunError {
   if (err instanceof UsageError) return new RunError(EXIT.usage, err.message);
   // `ask` against a host engine is a mode mismatch, not a crash: a reported
@@ -348,6 +422,9 @@ export async function runCli(argv: string[]): Promise<number> {
       if (args.json) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
       else process.stdout.write(formatCheckText(report, args.auditFile) + "\n");
       return EXIT.ok;
+    }
+    if (args.verb === "serve") {
+      return await runServe(args);
     }
     if (args.verb === "ask") {
       const result = await withSandy(args, (s) => s.ask(args.goal!));
