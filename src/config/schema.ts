@@ -137,6 +137,37 @@ export const mcpServersManifestSchema = z
     }
   });
 
+const loopbackHostSchema = z
+  .string()
+  .refine(
+    (h) => h === "127.0.0.1" || h === "localhost" || h === "::1",
+    { message: "engine.host must be a loopback address (127.0.0.1, localhost, or ::1)" },
+  )
+  .default("127.0.0.1")
+  .describe("Loopback-only bind address for the local model server");
+
+const llmEngineSchema = z
+  .object({
+    type: z
+      .enum(["llama-server", "openai-compatible"])
+      .default("llama-server")
+      .describe("Local model runtime"),
+    command: z
+      .array(z.string().min(1))
+      .min(1)
+      .optional()
+      .describe("Executable + args for the local model server; defaults to ['llama-server']"),
+    host: loopbackHostSchema,
+    port: z
+      .number()
+      .int()
+      .min(0)
+      .max(65535)
+      .default(0)
+      .describe("0 = pick a free loopback port"),
+  })
+  .strict();
+
 const llmSchema = z
   .object({
     provider: z
@@ -147,14 +178,20 @@ const llmSchema = z
     model: z.string().min(1).optional(),
     endpoint: z.string().url().optional(),
     api_key: envRefSchema.nullable().optional(),
+    // Phase 2 (standalone, SD-02/04): where the model file lives and how to
+    // start the local runtime. Additive — existing host/local configs keep
+    // loading (both optional at the schema level; provider constraints below
+    // decide when they're required).
+    model_path: absolutePathSchema.optional(),
+    engine: llmEngineSchema.optional(),
   })
   .strict()
   .refine((l) => {
     if (l.provider === "remote") return l.endpoint !== undefined;
-    if (l.provider === "local") return l.model !== undefined;
+    if (l.provider === "local") return l.model !== undefined && l.model_path !== undefined;
     return true;
   }, {
-    message: "provider constraints not met (remote needs endpoint; local needs model)",
+    message: "provider constraints not met (remote needs endpoint; local needs model + model_path)",
   });
 
 const sandboxSchema = z

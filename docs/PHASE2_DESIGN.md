@@ -5,6 +5,16 @@ proven. This document designs Phase 2 and surfaces the decisions that need
 sign-off before building. Read with `docs/PRD_Final.md` §6.6 (Mode B) and §7,
 `docs/DECISIONS.md`, and `docs/NEXT_STEPS.md`._
 
+_**Implementation status (2026-08-21):** §8 build order **steps 1–2 are done** —
+the `LlmEngine` lifecycle contract, `LlamaCppEngine`/`RemoteEngine`/`StubEngine`,
+the additive `llm` config fields (`model_path`, `engine` knobs, loopback
+constraint), `ModelRequest`'s structured-output knobs (open #6, implemented as
+(a)+(b): `responseFormat: "json"` and `jsonSchema` forwarded as
+`response_format`), `SandyCheckReport.engine`, and `Sandy.close()` reaping the
+model. 138/138 tests, no model or GPU required. Remaining: §8 steps 3–6
+(autonomous loop, local API + `sandy serve`, service lifecycle, standalone
+conformance). See `docs/DIARY.md` 2026-08-21._
+
 _**Review note (2026-08-20):** the first draft was reviewed against the actual
 code. One of the review's concerns turned out to be based on a false premise and
 is corrected below with a **verified fact**: in every no-egress boundary variant
@@ -341,6 +351,19 @@ service adds a REST surface for a UI / other local tools.
 - **Engine start timing** → lazy by default; eager on `sandy serve` (§6).
 - **Parse robustness** → bounded retry + deterministic fallback (§2.1).
 
+**Implemented (2026-08-21, §8 steps 1–2):**
+- **Engine lifecycle** → built: `start`/`isReady`/`status`/`close` on `LlmEngine`;
+  `LlamaCppEngine` (subprocess on loopback, fail-closed on missing model,
+  crash = `degraded`), `RemoteEngine` (guard-checked before dial), `StubEngine`
+  (CI double); `Sandy.close()` reaps the backend; `SandyCheckReport.engine`
+  added.
+- **Config field names (#4)** → settled by the implementation as sketched in
+  §4.4: `llm.model_path` + `llm.engine` (`type`/`command`/`host`/`port`),
+  `host` loopback-only, `local` requires `model` + `model_path`.
+- **Structured-output mechanism (#6)** → implemented as (a)+(b): `ModelRequest`
+  carries `responseFormat: "json"` and an optional `jsonSchema`; both backends
+  forward them as `response_format` (`json_object` / `json_schema`).
+
 **Still open (need a decision before build):**
 1. **Model + runtime distribution.** How does the user get `llama-server` + the
    GGUF? (a) docs say "install llama.cpp and set `model_path`", (b) a
@@ -350,34 +373,32 @@ service adds a REST surface for a UI / other local tools.
 2. **Default model.** Which 4–8B instruct model is the documented default?
    (Needs a pick + a license/size check.) Not blocking the architecture.
 3. **Resource-limit enforcement scope (§4.5).** Map caps to llama.cpp knobs now
-   and let the supervisor enforce the hard ceiling (leaning), or implement the
-   in-service hard bound in v2?
-4. **Exact additive `llm` config fields** (`model_path`, `engine` knobs) —
-   confirm names in §4.4 before the schema change.
-5. **REST vs CLI emphasis.** Both ship; confirm the REST surface list in §5 is
-   the right scope for v2 (vs. CLI-only + REST later). Leaning: ship both, REST
-   is thin.
-6. **Structured-output mechanism for the parse step (§4.2).** The current
-   `ModelRequest` is a bare `{ prompt, maxTokens? }` — there is **no way to
-   request structured/JSON output**, which the parse step needs to reliably get
-   `{ gather, report }` from a weak model. Decide the mechanism before the loop:
-   (a) extend `ModelRequest` with `responseFormat: "json"` and rely on the
-   backend's JSON mode (llama.cpp supports it), and/or (b) a JSON-schema
-   constraint prompt. Leaning (a) + (b) together. This is a `LlmEngine`
-   interface extension and should be settled in the same step as the lifecycle
-   contract.
+    and let the supervisor enforce the hard ceiling (leaning), or implement the
+    in-service hard bound in v2?
+4. **REST vs CLI emphasis.** Both ship; confirm the REST surface list in §5 is
+    the right scope for v2 (vs. CLI-only + REST later). Leaning: ship both, REST
+    is thin.
+
+**Resolved by implementation (2026-08-21, no longer open):**
+- **#4 (old) Exact additive `llm` config fields** → shipped as §4.4 sketches
+  them: `model_path` + `engine` block (see "Implemented" above).
+- **#6 (old) Structured-output mechanism** → (a)+(b) implemented at the seam
+  (`responseFormat`/`jsonSchema` → `response_format`); the loop can rely on it.
 
 ## 8. Build order (when approved)
 
-1. **`LlmEngine` lifecycle + local backend** — add `start`/`isReady`/`close` to
-   the interface; `LlamaCppEngine` (+ `RemoteEngine` for SD-04); extend
-   `ModelRequest` for structured output (open #6); a `StubEngine` test double;
-   `createLlmEngine` wired so `local`/`remote` construct instead of throwing;
-   `Sandy.close()` and `SandyCheckReport` extended. *Testable with no model.*
-2. **Config extension** — additive `llm` fields (§4.4) + loopback constraint +
-   fail-closed model-file check at `start()`.
+1. **`LlmEngine` lifecycle + local backend** — ~~add `start`/`isReady`/`close` to
+    the interface; `LlamaCppEngine` (+ `RemoteEngine` for SD-04); extend
+    `ModelRequest` for structured output (open #6); a `StubEngine` test double;
+    `createLlmEngine` wired so `local`/`remote` construct instead of throwing;
+    `Sandy.close()` and `SandyCheckReport` extended.~~ **DONE (2026-08-21)** —
+    all of the above, *tested with no model*.
+2. **Config extension** — ~~additive `llm` fields (§4.4) + loopback constraint +
+    fail-closed model-file check at `start()`.~~ **DONE (2026-08-21)** —
+    `model_path` + `engine` block as sketched in §4.4; `host` constrained to
+    loopback; `local` requires `model` + `model_path`.
 3. **Autonomous loop** — parse (bounded + validated, §2.1) → run → narrate;
-   unit-tested against `StubEngine`.
+    unit-tested against `StubEngine`.
 4. **Local API** — loopback-only REST over the composed Sandy, bounded job
    store (§5) + `sandy serve` verb.
 5. **Service lifecycle** — lazy/eager engine start (§6), graceful shutdown

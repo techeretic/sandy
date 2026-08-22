@@ -24,7 +24,7 @@ import { FileManager } from "./files/file-manager.js";
 import type { MutationJournal } from "./files/journal.js";
 import { createOrchestrator } from "./orchestrator/factory.js";
 import type { Orchestrator } from "./orchestrator/orchestrator.js";
-import { createLlmEngine, type LlmEngine } from "./engine.js";
+import { createLlmEngine, type EngineStatus, type LlmEngine } from "./engine.js";
 import type {
   OrchestratorRequest,
   OrchestratorResult,
@@ -59,6 +59,10 @@ export interface SandyDeps {
   confinement?: SandboxEnforcerOptions["confinement"];
   /** Injectable LLM engine (tests / Phase 2). Default: from config's llm provider. */
   engine?: LlmEngine;
+  /** Injectable fetch for a constructed remote/local engine (tests). */
+  engineFetch?: import("@modelcontextprotocol/sdk/shared/transport.js").FetchLike;
+  /** Injectable spawn for a constructed local engine (tests). */
+  engineSpawn?: (argv: string[], opts: { stdio: ["ignore", "pipe", "inherit"] }) => import("node:child_process").ChildProcess;
   /** MCP retry policy overrides. */
   retry?: Partial<RetryPolicy>;
   /** Per-request MCP timeout (ms). */
@@ -109,6 +113,9 @@ export interface SandyCheckReport {
     /** Per-server health (MCP-09). */
     health: HealthSummary;
   };
+  /** Reasoning-layer health (PRD §7). `not-started` is not a failure; only a
+   *  `degraded` engine flips `ok`. */
+  engine: EngineStatus;
 }
 
 /**
@@ -173,17 +180,30 @@ export async function createSandy(deps: SandyDeps): Promise<Sandy> {
     });
   }
 
-  // 3b. Reasoning layer (PRD §7). Host engine in plugin mode; a bundled/remote
-  //     engine (Phase 2, SD-02/04) drops in behind the same LlmEngine seam.
-  const engine = deps.engine ?? createLlmEngine(loaded.config.llm, audit);
-
   const mcpSink = mcpAuditSink(audit);
   const fileSink = fileAuditSink(audit);
 
-  // 4. MCP fleet (MCP-03/04/10). All egress is confined to the declared
-  //    endpoints via the NetworkGuard.
+  // 3b. Egress gate + secrets. All egress (MCP and any remote model) is confined
+  //     to the declared endpoints via the NetworkGuard.
   const guard = new NetworkGuard(loaded.config.sandbox.allowed_network);
   const resolver = new SecretResolver(env);
+
+  // 3c. Reasoning layer (PRD §7). Host engine in plugin mode; a bundled/remote
+  //     engine (Phase 2, SD-02/04) drops in behind the same LlmEngine seam.
+  //     A remote endpoint's auth token is resolved at point of use (never stored).
+  const llm = loaded.config.llm;
+  const bearerToken =
+    llm.provider === "remote" && llm.api_key ? resolver.resolve(llm.api_key) : undefined;
+  const engine =
+    deps.engine ??
+    createLlmEngine(llm, audit, {
+      guard,
+      bearerToken,
+      fetchImpl: deps.engineFetch,
+      spawnFactory: deps.engineSpawn,
+    });
+
+  // 4. MCP fleet (MCP-03/04/10).
   const manager = new McpClientManager(loaded.manifest.servers, resolver, guard, {
     retry: deps.retry,
     requestTimeoutMs: deps.requestTimeoutMs,
@@ -222,8 +242,12 @@ export async function createSandy(deps: SandyDeps): Promise<Sandy> {
     connectResult,
     check(): SandyCheckReport {
       const report = enforcer.report;
+      const engineStatus = engine.status();
       return {
-        ok: !enforcer.degraded && connectResult.failed.length === 0,
+        ok:
+          !enforcer.degraded &&
+          connectResult.failed.length === 0 &&
+          engineStatus.status !== "degraded",
         config: {
           mode: loaded.config.mode,
           configDir: loaded.configDir,
@@ -245,12 +269,16 @@ export async function createSandy(deps: SandyDeps): Promise<Sandy> {
           failed: connectResult.failed,
           health: manager.health(),
         },
+        engine: engineStatus,
       };
     },
     run(request: OrchestratorRequest): Promise<OrchestratorResult> {
       return orchestrator.run(request);
     },
     async close(): Promise<void> {
+      // Stop the model backend first so a model process is never orphaned,
+      // then the MCP fleet, then flush the audit log.
+      await engine.close();
       await manager.close();
       await audit.close();
     },

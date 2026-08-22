@@ -11,7 +11,9 @@ import {
   runCli,
   EXIT,
   InMemoryAuditLogger,
+  NetworkGuard,
   type LlmConfig,
+  type LlmEngine,
   type Sandy,
 } from "../src/index.js";
 import {
@@ -279,13 +281,67 @@ describe("createLlmEngine: reasoning-layer seam (PRD §7, AU-01, SD-02/04)", () 
     expect((event.data as Record<string, unknown>)["provider"]).toBe("host");
   });
 
-  it("fails closed for 'local' (bundled model, Phase 2) and 'remote' (Phase 2)", () => {
-    expect(() => createLlmEngine({ provider: "local", model: "llama-7b" } as LlmConfig, audit())).toThrow(
-      /Phase 2/,
+  it("builds the local engine for llm.provider 'local' (needs model + model_path)", () => {
+    const engine = createLlmEngine(
+      { provider: "local", model: "llama-7b", model_path: "/models/x.gguf" } as LlmConfig,
+      audit(),
     );
+    expect(engine.provider).toBe("local");
+    expect(engine.isReady()).toBe(false); // lazy: not started yet
+    expect(engine.status().status).toBe("not-started");
+  });
+
+  it("builds the remote engine for llm.provider 'remote' (needs endpoint + a guard)", () => {
+    const engine = createLlmEngine(
+      { provider: "remote", endpoint: "http://model.internal:8080" } as LlmConfig,
+      audit(),
+      { guard: new NetworkGuard(["model.internal:8080"]) },
+    );
+    expect(engine.provider).toBe("remote");
+    expect(engine.isReady()).toBe(false);
+  });
+
+  it("fails closed on missing local model_path or a missing remote guard", () => {
+    expect(() =>
+      createLlmEngine({ provider: "local", model: "llama-7b" } as LlmConfig, audit()),
+    ).toThrow(/model_path/);
     expect(() =>
       createLlmEngine({ provider: "remote", endpoint: "http://x" } as LlmConfig, audit()),
-    ).toThrow(/Phase 2/);
+    ).toThrow(/egress guard/);
+  });
+});
+
+describe("createSandy: engine wiring (PRD §7)", () => {
+  it("exposes engine health in check() and a degraded engine flips ok:false", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, { allowedPaths: [ws] });
+    const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }]);
+    inMemServers.push(crm);
+    const broken: LlmEngine = {
+      provider: "broken",
+      start: async () => {},
+      isReady: () => false,
+      status: () => ({ status: "degraded", error: "model process died" }),
+      record: () => ({ seq: 0, at: "", type: "model_invocation", data: {} }),
+      invoke: async () => {
+        throw new Error("no");
+      },
+      close: async () => {},
+    };
+    const sandy = await createSandy({
+      sandyPath: cfg,
+      transportFactory: () => crm.transport,
+      engine: broken,
+      detection: pinnedDetection,
+    });
+    try {
+      const report = sandy.check();
+      expect(report.engine.status).toBe("degraded");
+      expect(report.engine.error).toBe("model process died");
+      expect(report.ok).toBe(false); // a degraded engine is a reported, not crash, state
+    } finally {
+      await closeAll([sandy]);
+    }
   });
 });
 

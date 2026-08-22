@@ -147,10 +147,19 @@ export {
 export {
   createLlmEngine,
   HostLlmEngine,
+  LlamaCppEngine,
+  RemoteEngine,
+  StubEngine,
+  type CreateLlmEngineOptions,
+  type EngineState,
+  type EngineStatus,
+  type LlamaCppEngineOptions,
   type LlmEngine,
   type ModelRequest,
   type ModelResult,
   type ModelUsage,
+  type RemoteEngineOptions,
+  type StubEngineOptions,
 } from "./engine.js";
 export { CLI_NAME, EXIT, runCli } from "./cli.js";
 export {
