@@ -64,8 +64,16 @@ function describeProgress(e: ProgressEvent): string {
       return `${e.task} failed: ${e.error}`;
     case "report-writing":
       return `writing report → ${e.path}`;
-    case "done":
-      return `done: ${e.claims} claim(s), ${e.gaps} gap(s)`;
+      case "done":
+        return `done: ${e.claims} claim(s), ${e.gaps} gap(s)`;
+      case "parse-started":
+        return `planning (up to ${e.maxAttempts} attempt(s))`;
+      case "parse-attempt-failed":
+        return `plan attempt ${e.attempt} rejected: ${e.error}`;
+      case "parse-fallback":
+        return `plan: ${e.reason}`;
+      case "narrating":
+        return "narrating";
   }
 }
 

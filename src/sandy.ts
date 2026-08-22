@@ -25,6 +25,7 @@ import type { MutationJournal } from "./files/journal.js";
 import { createOrchestrator } from "./orchestrator/factory.js";
 import type { Orchestrator } from "./orchestrator/orchestrator.js";
 import { createLlmEngine, type EngineStatus, type LlmEngine } from "./engine.js";
+import { AutonomousLoop, type LoopResult } from "./standalone/loop.js";
 import type {
   OrchestratorRequest,
   OrchestratorResult,
@@ -132,12 +133,24 @@ export interface Sandy {
   manager: McpClientManager;
   files: FileManager;
   orchestrator: Orchestrator;
+  /**
+   * The autonomous reasoning loop (Phase 2, design §2.1): a natural-language
+   * goal → model-planned gather tasks → report → optional model narrative.
+   * The deterministic core is the same `orchestrator`; only the planning and
+   * narrating move to the bundled `engine`.
+   */
+  loop: AutonomousLoop;
   /** Startup MCP connection result (ok / failed). */
   connectResult: ConnectResult;
   /** Capability + MCP health snapshot. */
   check(): SandyCheckReport;
   /** Execute an orchestrator request end-to-end (gather → report). */
   run(request: OrchestratorRequest): Promise<OrchestratorResult>;
+  /**
+   * Ask the bundled model to do the whole job (standalone, design §2.1):
+   * plan → gather → report → narrate. Delegates to {@link loop}.
+   */
+  ask(goal: string): Promise<LoopResult>;
   /** Close MCP connections and flush the audit log. Idempotent-safe. */
   close(): Promise<void>;
 }
@@ -231,6 +244,23 @@ export async function createSandy(deps: SandyDeps): Promise<Sandy> {
     onProgress: deps.onProgress,
   });
 
+  // 7. Autonomous loop (Phase 2, design §2.1). The legal tool catalog is the
+  //    manifest's allowed_tools — the model can only plan what the policy
+  //    already allows (the allowlist is enforced twice: at planning and at the
+  //    MCP layer).
+  const toolCatalog = loaded.manifest.servers.flatMap((s) =>
+    s.allowed_tools.map((tool) => ({ server: s.name, tool })),
+  );
+  const loop = new AutonomousLoop({
+    engine,
+    orchestrator,
+    audit,
+    files,
+    reportDir: loaded.reportOutputDir,
+    tools: toolCatalog,
+    onProgress: deps.onProgress,
+  });
+
   return {
     loaded,
     enforcer,
@@ -239,6 +269,7 @@ export async function createSandy(deps: SandyDeps): Promise<Sandy> {
     manager,
     files,
     orchestrator,
+    loop,
     connectResult,
     check(): SandyCheckReport {
       const report = enforcer.report;
@@ -274,6 +305,9 @@ export async function createSandy(deps: SandyDeps): Promise<Sandy> {
     },
     run(request: OrchestratorRequest): Promise<OrchestratorResult> {
       return orchestrator.run(request);
+    },
+    ask(goal: string): Promise<LoopResult> {
+      return loop.run(goal);
     },
     async close(): Promise<void> {
       // Stop the model backend first so a model process is never orphaned,

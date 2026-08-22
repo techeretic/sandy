@@ -7,6 +7,7 @@ import { SandboxViolationError } from "./sandbox/confinement.js";
 import { orchestratorRequestSchema, toOrchestratorRequest } from "./orchestrator/request.js";
 import { createSandy, type Sandy, type SandyCheckReport } from "./sandy.js";
 import type { OrchestratorResult, ProgressEvent } from "./orchestrator/orchestrator.js";
+import { NoModelEngineError, type LoopResult } from "./standalone/loop.js";
 
 export const CLI_NAME = "sandy";
 
@@ -27,8 +28,9 @@ export const EXIT = {
 } as const;
 
 interface ParsedArgs {
-  verb?: "check" | "run";
+  verb?: "check" | "run" | "ask";
   requestFile?: string;
+  goal?: string;
   configPath?: string;
   auditFile?: string;
   json: boolean;
@@ -91,16 +93,27 @@ function parseArgs(argv: string[]): ParsedArgs {
     return { ...out, error: "missing verb (expected `check` or `run`)" };
   }
   const verb = positional[0];
-  if (verb !== "check" && verb !== "run") {
-    return { ...out, error: `unknown verb: ${verb} (expected '${CLI_NAME} check' or '${CLI_NAME} run')` };
+  if (verb !== "check" && verb !== "run" && verb !== "ask") {
+    return { ...out, error: `unknown verb: ${verb} (expected '${CLI_NAME} check', '${CLI_NAME} run', or '${CLI_NAME} ask')` };
   }
   out.verb = verb;
   if (positional.length > 1) {
-    if (verb === "run") out.requestFile = positional[1];
-    else return { ...out, error: `unexpected argument: ${positional[1]}` };
+    if (verb === "run") {
+      out.requestFile = positional[1];
+      if (positional.length > 2) return { ...out, error: `unexpected argument: ${positional[2]}` };
+    } else if (verb === "ask") {
+      // The goal is natural language — join any remaining words (quoting varies
+      // across shells, so unquoted multi-word goals work too).
+      out.goal = positional.slice(1).join(" ");
+    } else {
+      return { ...out, error: `unexpected argument: ${positional[1]}` };
+    }
   }
   if (verb === "run" && !out.requestFile) {
     return { ...out, error: "`run` requires a request file: sandy run <request.json>" };
+  }
+  if (verb === "ask" && !out.goal) {
+    return { ...out, error: "`ask` requires a goal: sandy ask \"<goal>\"" };
   }
   return out;
 }
@@ -109,8 +122,9 @@ function printHelp(): void {
   process.stdout.write(`${CLI_NAME} — SANDBOXable AI assistant (MCP-only, VPN-safe, audit-logged)
 
 usage:
-  ${CLI_NAME} check [options]        validate config + print capability/health report
-  ${CLI_NAME} run <request.json> [options]   run an orchestrator request (gather → report)
+  ${CLI_NAME} check [options]              validate config + print capability/health report
+  ${CLI_NAME} run <request.json> [options] run an orchestrator request (gather → report)
+  ${CLI_NAME} ask "<goal>" [options]       ask the bundled model to plan + run + narrate (standalone)
 
 options:
   -c, --config <path>    path to sandy.json (default: $SANDY_CONFIG or ./sandy.json)
@@ -148,6 +162,18 @@ function progressSink(enabled: boolean): (e: ProgressEvent) => void {
         break;
       case "done":
         w(`\u2022 done: ${e.claims} claim(s), ${e.gaps} gap(s)`);
+        break;
+      case "parse-started":
+        w(`\u2022 planning (${e.maxAttempts} attempt(s) max)`);
+        break;
+      case "parse-attempt-failed":
+        w(`  \u2717 plan attempt ${e.attempt}: ${e.error}`);
+        break;
+      case "parse-fallback":
+        w(`  \u21b3 ${e.reason}`);
+        break;
+      case "narrating":
+        w(`\u270e narrating`);
         break;
     }
   };
@@ -206,6 +232,36 @@ function formatRunText(r: OrchestratorResult, auditFile?: string): string {
   return lines.join("\n");
 }
 
+function formatAskText(r: LoopResult, auditFile?: string): string {
+  const lines: string[] = [];
+  lines.push("Sandy ask");
+  lines.push(`  goal:    ${r.goal}`);
+  lines.push(`  plan:    ${r.plan.source}${r.plan.reason ? ` (${r.plan.reason})` : ""} after ${r.plan.attempts} attempt(s)`);
+  if (r.plan.source !== "refused" && r.request) {
+    for (const t of r.request.gather) {
+      lines.push(`    - ${t.id}: ${t.server}/${t.tool}`);
+    }
+  }
+  lines.push(`  claims (${r.claims.length}):`);
+  if (r.claims.length === 0) lines.push("    (none)");
+  for (const c of r.claims) {
+    const src = `task=${c.source.task}, ${c.source.server}/${c.source.tool}`;
+    lines.push(`    ${c.ref}. ${c.text}  [${src}]`);
+  }
+  lines.push(`  gaps (${r.gaps.length}):`);
+  if (r.gaps.length === 0) lines.push("    (none)");
+  for (const g of r.gaps) {
+    lines.push(`    \u2212 ${g.task} (${g.server}/${g.tool}): ${g.reason} \u2014 ${g.detail}`);
+  }
+  if (r.narrative) {
+    lines.push(`  narrative (local model):`);
+    for (const line of r.narrative.text.split("\n")) lines.push(`    ${line}`);
+  }
+  if (r.reportPath) lines.push(`  report:  ${r.reportPath}`);
+  lines.push(`  audit:   ${auditFile ?? "in-memory"}`);
+  return lines.join("\n");
+}
+
 async function loadRequest(file: string): Promise<ReturnType<typeof toOrchestratorRequest>> {
   let raw: string;
   try {
@@ -258,6 +314,9 @@ async function withSandy<T>(
 
 function translateError(err: unknown): RunError {
   if (err instanceof UsageError) return new RunError(EXIT.usage, err.message);
+  // `ask` against a host engine is a mode mismatch, not a crash: a reported
+  // usage error (the host reasons directly in plugin mode).
+  if (err instanceof NoModelEngineError) return new RunError(EXIT.usage, err.message);
   if (err instanceof ConfigError) return new RunError(EXIT.config, err.message);
   if (err instanceof SandboxViolationError) return new RunError(EXIT.sandbox, err.message);
   return new RunError(EXIT.error, err instanceof Error ? (err.stack ?? err.message) : String(err));
@@ -288,6 +347,12 @@ export async function runCli(argv: string[]): Promise<number> {
       const report = await withSandy(args, (s) => s.check());
       if (args.json) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
       else process.stdout.write(formatCheckText(report, args.auditFile) + "\n");
+      return EXIT.ok;
+    }
+    if (args.verb === "ask") {
+      const result = await withSandy(args, (s) => s.ask(args.goal!));
+      if (args.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      else process.stdout.write(formatAskText(result, args.auditFile) + "\n");
       return EXIT.ok;
     }
     // verb === "run"

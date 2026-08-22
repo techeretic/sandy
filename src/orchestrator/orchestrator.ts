@@ -25,7 +25,13 @@ export type ProgressEvent =
   | { type: "task-succeeded"; task: string; durationMs: number }
   | { type: "task-failed"; task: string; error: string }
   | { type: "report-writing"; path: string }
-  | { type: "done"; claims: number; gaps: number };
+  | { type: "done"; claims: number; gaps: number }
+  // Autonomous-loop (Phase 2) stages — the host LLM's planning/narrating, done
+  // by the bundled model instead.
+  | { type: "parse-started"; maxAttempts: number }
+  | { type: "parse-attempt-failed"; attempt: number; error: string }
+  | { type: "parse-fallback"; reason: string }
+  | { type: "narrating" };
 
 /** A provenance-tracked statement produced by the run (RG-04). */
 export interface Claim {

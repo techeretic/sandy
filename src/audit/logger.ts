@@ -20,7 +20,13 @@ export type AuditEventType =
   | "sandbox_violation"
   | "egress_blocked"
   | "session_start"
-  | "session_end";
+  | "session_end"
+  // Autonomous loop (Phase 2): the bundled model's parse/narrate steps. The
+  // model invocations themselves are `model_invocation` events (AU-01); these
+  // record the loop's own decisions (outcome, plan source, narrative).
+  | "standalone_parse"
+  | "standalone_plan"
+  | "standalone_narrate";
 
 export interface AuditEvent {
   /** Monotonic sequence number within the session (1-based). */

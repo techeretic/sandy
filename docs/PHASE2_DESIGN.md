@@ -5,15 +5,21 @@ proven. This document designs Phase 2 and surfaces the decisions that need
 sign-off before building. Read with `docs/PRD_Final.md` §6.6 (Mode B) and §7,
 `docs/DECISIONS.md`, and `docs/NEXT_STEPS.md`._
 
-_**Implementation status (2026-08-21):** §8 build order **steps 1–2 are done** —
+_**Implementation status (2026-08-22):** §8 build order **steps 1–3 are done** —
 the `LlmEngine` lifecycle contract, `LlamaCppEngine`/`RemoteEngine`/`StubEngine`,
 the additive `llm` config fields (`model_path`, `engine` knobs, loopback
 constraint), `ModelRequest`'s structured-output knobs (open #6, implemented as
 (a)+(b): `responseFormat: "json"` and `jsonSchema` forwarded as
-`response_format`), `SandyCheckReport.engine`, and `Sandy.close()` reaping the
-model. 138/138 tests, no model or GPU required. Remaining: §8 steps 3–6
-(autonomous loop, local API + `sandy serve`, service lifecycle, standalone
-conformance). See `docs/DIARY.md` 2026-08-21._
+`response_format`), `SandyCheckReport.engine`, `Sandy.close()` reaping the
+model, and the **autonomous loop** (`src/standalone/loop.ts`, §2.1): bounded
++ validated parse (retry cap 3, error fed back, deterministic conservative
+fallback, refuse-and-report), unchanged orchestrator run, optional clearly-
+labeled narrate — wired in as `Sandy.loop` / `sandy ask "<goal>"`, with its own
+audit events (`standalone_parse`/`standalone_plan`/`standalone_narrate`) and a
+fail-closed `NoModelEngineError` against the host engine. 150/150 tests, no
+model or GPU required. Remaining: §8 steps 4–6 (local API + `sandy serve`,
+service lifecycle, standalone conformance). See `docs/DIARY.md` 2026-08-21 and
+2026-08-22._
 
 _**Review note (2026-08-20):** the first draft was reviewed against the actual
 code. One of the review's concerns turned out to be based on a false premise and
@@ -133,7 +139,7 @@ Key properties:
 | Orchestrator + report | **Reuse, unchanged** | the model plugs in around it, not into it |
 | `LlmEngine` (`src/engine.ts`) | **Extend** | implement `invoke()` for a local backend **and** add a lifecycle contract (start/close/health, §4.2); extend `ModelRequest` for structured output; `createLlmEngine` already fails closed for `local`/`remote` until then |
 | `SandyCheckReport` (`src/sandy.ts`) | **Extend** | add an `engine` health field (loaded/ready/dead + reason) so `sandy check` surfaces model health |
-| **Autonomous loop** | **NEW** | `src/standalone/loop.ts` (proposed): parse → run → narrate, bounded + validated |
+| **Autonomous loop** | **Done (2026-08-22)** | `src/standalone/loop.ts`: parse → run → narrate, bounded + validated + deterministic fallback; `Sandy.loop` / `sandy ask` |
 | **Local API** | **NEW** | `src/standalone/api.ts` (proposed): loopback-only REST, bounded job store |
 | **Service lifecycle** | **NEW** | `src/standalone/service.ts` + `sandy serve` CLI verb (proposed) |
 | Model runtime | **NEW** | llama.cpp (see §4) |
@@ -351,6 +357,21 @@ service adds a REST surface for a UI / other local tools.
 - **Engine start timing** → lazy by default; eager on `sandy serve` (§6).
 - **Parse robustness** → bounded retry + deterministic fallback (§2.1).
 
+**Implemented (2026-08-22, §8 step 3):**
+- **Autonomous loop** → built: `src/standalone/loop.ts` (`AutonomousLoop`), the
+  §2.1 parse → run → narrate. Parse is bounded (default 3 attempts, the error
+  fed back on retry) and validated against `orchestratorRequestSchema` **and**
+  the manifest's legal tool catalog (the model can only plan what the policy
+  already allows). On exhaustion a deterministic conservative fallback (a single
+  task when the goal names exactly one known tool) or refuse-and-report with an
+  explicit gap — never unbounded, never an invented plan. The run is the
+  unchanged `Orchestrator`; narrate is an optional clearly-labeled model summary
+  re-rendered into the report's Summary slot. A dead model degrades (fallback /
+  no narrative), never a crash; every model call is audited (`model_invocation`)
+  and each loop step is audited (`standalone_parse`/`standalone_plan`/
+  `standalone_narrate`). Exposed as `Sandy.loop` / `sandy ask "<goal>"`;
+  `NoModelEngineError` fails closed against the host (plugin) engine.
+
 **Implemented (2026-08-21, §8 steps 1–2):**
 - **Engine lifecycle** → built: `start`/`isReady`/`status`/`close` on `LlmEngine`;
   `LlamaCppEngine` (subprocess on loopback, fail-closed on missing model,
@@ -397,10 +418,17 @@ service adds a REST surface for a UI / other local tools.
     fail-closed model-file check at `start()`.~~ **DONE (2026-08-21)** —
     `model_path` + `engine` block as sketched in §4.4; `host` constrained to
     loopback; `local` requires `model` + `model_path`.
-3. **Autonomous loop** — parse (bounded + validated, §2.1) → run → narrate;
-    unit-tested against `StubEngine`.
+3. **Autonomous loop** — ~~parse (bounded + validated, §2.1) → run → narrate;
+    unit-tested against `StubEngine`.~~ **DONE (2026-08-22)** —
+    `src/standalone/loop.ts`: bounded (≤3) validated parse with the error fed
+    back, deterministic conservative fallback (single named tool) or
+    refuse-and-report with an explicit gap; run through the unchanged
+    `Orchestrator`; optional clearly-labeled narrate re-rendered into the
+    report. Wired in as `Sandy.loop` / `sandy ask "<goal>"`; a dead model
+    degrades (fallback / no narrative), never crashes; fails closed against the
+    host engine. Unit-tested with a scripted in-process engine (no model/GPU).
 4. **Local API** — loopback-only REST over the composed Sandy, bounded job
-   store (§5) + `sandy serve` verb.
+    store (§5) + `sandy serve` verb.
 5. **Service lifecycle** — lazy/eager engine start (§6), graceful shutdown
    (engine.close), model health in `check()`.
 6. **Conformance for standalone** — **parameterize** the existing egress +

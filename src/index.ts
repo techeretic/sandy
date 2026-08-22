@@ -161,6 +161,13 @@ export {
   type RemoteEngineOptions,
   type StubEngineOptions,
 } from "./engine.js";
+export {
+  AutonomousLoop,
+  NoModelEngineError,
+  type AutonomousLoopOptions,
+  type LoopResult,
+  type ToolRef,
+} from "./standalone/loop.js";
 export { CLI_NAME, EXIT, runCli } from "./cli.js";
 export {
   SandyPluginAPI,

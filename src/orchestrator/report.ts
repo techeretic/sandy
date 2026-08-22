@@ -28,7 +28,7 @@ export function renderMarkdownReport(input: RenderReportInput): string {
   if (input.summary && input.summary.trim().length > 0) {
     lines.push("## Summary");
     lines.push("");
-    lines.push(`_(host model narrative)_`);
+    lines.push(`_(model narrative — a local/host model wrote this; it may vary in quality. The claims below are independently traceable and remain the source of truth.)_`);
     lines.push("");
     lines.push(input.summary.trim());
     lines.push("");
