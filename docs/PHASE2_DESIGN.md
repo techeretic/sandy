@@ -5,7 +5,8 @@ proven. This document designs Phase 2 and surfaces the decisions that need
 sign-off before building. Read with `docs/PRD_Final.md` §6.6 (Mode B) and §7,
 `docs/DECISIONS.md`, and `docs/NEXT_STEPS.md`._
 
-_**Implementation status (2026-08-22):** §8 build order **steps 1–5 are done** —
+_**Implementation status (2026-08-22):** **Phase 2 is complete** — §8 build order
+**steps 1–6 are all done**. Steps 1–5 —
 the `LlmEngine` lifecycle contract, `LlamaCppEngine`/`RemoteEngine`/`StubEngine`,
 the additive `llm` config fields (`model_path`, `engine` knobs, loopback
 constraint), `ModelRequest`'s structured-output knobs (open #6, implemented as
@@ -27,9 +28,19 @@ in-band (the plugin's `ProgressCollector` pattern). Plus the **service
 lifecycle** (§6) — the `sandy serve` verb: eager `engine.start()`, graceful
 SIGINT/SIGTERM shutdown (close the API, let the in-flight job finish, reap the
 model, close MCP, flush audit); a dead model is a reported `degraded` state,
-not a crash. 163/163 tests, no model or GPU required. Remaining: §8 step 6
-(standalone conformance — parameterize the harness config templates). See
-`docs/DIARY.md` 2026-08-21 and 2026-08-22._
+not a crash. **Step 6 (2026-08-22):** **standalone conformance** — the existing
+egress + sandbox-matrix harnesses are **parameterized** (a `SANDY_MODE=standalone`
+switch) so the SAME no-egress / cross-sandbox proof runs for a standalone config
+with the in-sandbox loopback model: a new `conformance/stub-model.mjs` (a loopback
+OpenAI-compatible stand-in for the bundled GGUF, design §9) lets `sandy ask` drive
+the full loop with no real model and no external egress. Proven byte-identical
+across Docker + Firejail for both modes, with the egress harness's three
+assertions (EP hit / external blocked / undeclared fails closed) holding with the
+model present, plus an in-process standalone egress leg (`conformance/egress.test.ts`:
+a `standalone` config + injected model engine runs the full `ask` loop and every
+dialed URL is the one declared endpoint). 164/164 tests, no model or GPU required.
+See `docs/DIARY.md`
+2026-08-21 and 2026-08-22._
 
 _**Review note (2026-08-20):** the first draft was reviewed against the actual
 code. One of the review's concerns turned out to be based on a false premise and
@@ -479,11 +490,16 @@ service adds a REST surface for a UI / other local tools.
     (API → in-flight job → `engine.close()` → MCP → audit flush); engine start
     stays **lazy** for `check`/`run`/`ask`; a dead model is a reported `degraded`
     state, never a crash.
-6. **Conformance for standalone** — **parameterize** the existing egress +
-   sandbox matrix config templates (mode + `llm` provider/model) and run them
-   against a standalone config (proves parity/egress hold, incl. the in-sandbox
-   loopback model); add a stub-model end-to-end (goal → report) to the CI
-   matrix.
+6. **Conformance for standalone** — ~~**parameterize** the existing egress +
+    sandbox matrix config templates (mode + `llm` provider/model) and run them
+    against a standalone config (proves parity/egress hold, incl. the in-sandbox
+    loopback model); add a stub-model end-to-end (goal → report) to the CI
+    matrix.~~ **DONE (2026-08-22)** — the harnesses gain a `SANDY_MODE=standalone`
+    switch (a `conformance/stub-model.mjs` loopback stand-in for the model, §9),
+    so `SANDY_MODE=standalone` runs `sandy check` + `sandy ask` under both
+    boundaries and reuses the egress harness's three assertions; the CI matrix
+    now runs both modes (4 legs) and proves each mode byte-identical across
+    Docker + Firejail. Verified locally with both boundaries present.
 
 ## 9. Conformance & test strategy
 

@@ -32,9 +32,11 @@
     "conformance": "npm run test:conformance && npm run conformance:docker && npm run conformance:sandbox",
     "test:conformance": "vitest run conformance",
     "conformance:docker": "npm run build && bash conformance/run-docker.sh",
+    "conformance:docker:standalone": "npm run build && SANDY_MODE=standalone bash conformance/run-docker.sh",
     "conformance:sandbox": "npm run build && bash conformance/sandbox-matrix.sh",
     "conformance:sandbox:docker": "npm run build && SANDY_MATRIX=docker bash conformance/sandbox-matrix.sh",
-    "conformance:sandbox:firejail": "npm run build && SANDY_MATRIX=firejail bash conformance/sandbox-matrix.sh"
+    "conformance:sandbox:firejail": "npm run build && SANDY_MATRIX=firejail bash conformance/sandbox-matrix.sh",
+    "conformance:sandbox:standalone": "npm run build && SANDY_MODE=standalone bash conformance/sandbox-matrix.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

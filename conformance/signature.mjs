@@ -40,6 +40,10 @@ const [checkFile, runFile] = parse(process.argv.slice(2));
 const check = JSON.parse(await readFile(checkFile, "utf8"));
 const run = JSON.parse(await readFile(runFile, "utf8"));
 
+// Engine health: stable across boundaries (a ready stub/local model reports
+// the same status/model), and the key standalone-mode fact — the in-sandbox
+// loopback model came up. (The bound `port` is ephemeral, so it's excluded.)
+const engine = check.engine ?? {};
 const signature = {
   check: {
     ok: check.ok,
@@ -49,9 +53,14 @@ const signature = {
     allowedNetwork: [...(check.sandbox.allowedNetwork ?? check.sandbox.allowed_network ?? [])].sort(),
     mcpConnected: [...check.mcp.connected].sort(),
     mcpFailed: check.mcp.failed.map((f) => f.server).sort(),
+    engineStatus: engine.status ?? "absent",
+    engineModel: engine.model ?? null,
   },
   run: {
     goal: run.goal,
+    // `sandy ask` (standalone) returns a LoopResult (with a `plan`); `sandy run`
+    // returns an OrchestratorResult. The provenance fields are common to both.
+    ...(run.plan ? { planSource: run.plan.source } : {}),
     claimCount: run.claims.length,
     gapCount: run.gaps.length,
     claims: run.claims.map((c) => ({

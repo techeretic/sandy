@@ -25,6 +25,15 @@
 # Firejail conformance (SB-09 wants >=2 sandboxes) is the same harness with the
 # firejail equivalent of the internal-network boundary; the enforcer is
 # runtime-agnostic, so only the boundary command changes.
+#
+# Mode (env):
+#   SANDY_MODE=standalone   run the STANDALONE service (design §8 step 6): the
+#       config carries a bundled-model llm block (a loopback stub-model standing
+#       in for the real GGUF, design §9) and the run is `sandy ask` (the full
+#       loop). The in-sandbox loopback model's egress is zero by construction
+#       (§4.0) — its only path is loopback to its own process — so the only
+#       EXTERNAL egress is still the declared MCP endpoint, and all three
+#       assertions (EP hit / external blocked / undeclared fails closed) hold.
 
 set -euo pipefail
 
@@ -87,16 +96,44 @@ for _ in $(seq 1 40); do
 done
 log "EP ready at ${EP_URL} (hostport ${EP_HOSTPORT})"
 
+# Mode: plugin (default) or standalone (design §8 step 6). In standalone the
+# config carries a bundled-model llm block (a loopback stub-model standing in
+# for the real GGUF, design §9) and the run is `sandy ask` (the full loop). The
+# stub model is in-sandbox on loopback (zero egress by construction, §4.0), so
+# the ONLY external egress is still the declared MCP endpoint.
+SANDY_MODE="${SANDY_MODE:-plugin}"
+ASK_GOAL="Summarize EMEA deals"
+STUB_MODEL="/app/conformance/stub-model.mjs"   # the path inside the image
+
+# The `sandy <verb> <arg>` invocation for the run step (relative to /ws). The
+# standalone goal is emitted unquoted; the CLI re-joins the remaining positionals
+# into the goal (no literal quotes leak into it).
+run_args() {
+  if [ "$SANDY_MODE" = "standalone" ]; then
+    printf 'ask %s' "$ASK_GOAL"
+  else
+    printf 'run %s' "request.json"
+  fi
+}
+
 # --- helper: write a workspace (config + manifest + request) for `sandy` ------
 mk_ws() { # $1=host dir, $2=allowed-network endpoint, $3=ep-url
   local d="$1" net2="$2" url="$3"
+  local mode llm
+  if [ "$SANDY_MODE" = "standalone" ]; then
+    mode="standalone"
+    llm="{ \"provider\": \"local\", \"model\": \"stub\", \"model_path\": \"${STUB_MODEL}\", \"engine\": { \"type\": \"llama-server\", \"command\": [\"node\", \"${STUB_MODEL}\"], \"host\": \"127.0.0.1\", \"port\": 0 } }"
+  else
+    mode="plugin"
+    llm="{ \"provider\": \"host\" }"
+  fi
   mkdir -p "$d/reports"
   cat > "$d/mcp-servers.json" <<JSON
 { "servers": [ { "name": "crm", "transport": "http", "url": "${url}", "version": "1.0.0",
   "capabilities": ["read_deals"], "allowed_tools": ["read_deals"] } ] }
 JSON
   cat > "$d/sandy.json" <<JSON
-{ "mode": "plugin", "llm": { "provider": "host" },
+{ "mode": "${mode}", "llm": ${llm},
   "sandbox": { "runtime": "docker", "allowed_paths": ["/ws"], "allowed_network": ["${net2}"],
     "max_memory_mb": 512, "max_cpu_percent": 25 },
   "mcp_servers": "./mcp-servers.json", "report_output_dir": "./reports",
@@ -112,14 +149,14 @@ JSON
 count_ep_hits() { docker exec "$EP_NAME" sh -c 'wc -l < /ep/requests.log 2>/dev/null || echo 0'; }
 
 # --- TEST 1: the only reachable endpoint is the declared one; the run succeeds --
-log "TEST 1: sandy run against the single declared endpoint"
+log "TEST 1: sandy run/ask (${SANDY_MODE}) against the single declared endpoint"
 WS="$(mktemp -d /tmp/sandy-egress-XXXXXX)"
 mk_ws "$WS" "$EP_HOSTPORT" "$EP_URL"
 
 run_sandy() { docker run --rm --network "$NET" -v "${WS}:/ws" -w /ws "$IMAGE" node /app/bin/sandy.js "$@"; }
 
 run_sandy check --config sandy.json --no-progress | sed 's/^/    /'
-run_sandy run request.json --config sandy.json --no-progress | sed 's/^/    /' || fail "sandy run did not succeed"
+run_sandy $(run_args) --config sandy.json --no-progress | sed 's/^/    /' || fail "sandy run/ask did not succeed"
 
 HITS="$(count_ep_hits)"
 [ "$HITS" -gt 0 ] || fail "EP was never reached (expected the declared endpoint to receive traffic)"

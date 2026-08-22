@@ -29,9 +29,15 @@
 #   SANDY_MATRIX=docker     run only the Docker boundary (used by CI matrix)
 #   SANDY_MATRIX=firejail   run only the Firejail boundary (used by CI matrix)
 #   (unset)                 run BOTH and prove they are identical (default)
+#   SANDY_MODE=standalone   run the STANDALONE service instead of plugin mode
+#       (design §8 step 6): the config gets a bundled-model llm block (a
+#       loopback stub-model standing in for the real GGUF, design §9) and the
+#       run is `sandy ask` (parse -> run -> narrate) instead of `sandy run`.
+#       Proves the no-egress / cross-sandbox guarantees hold WITH the in-
+#       sandbox loopback model (SD-05/06 at the security level).
 #
 # Run:  npm run conformance:sandbox
-#   (or: bash conformance/sandbox-matrix.sh)
+#   (or: bash conformance/sandbox-matrix.sh; standalone: SANDY_MODE=standalone)
 
 set -euo pipefail
 
@@ -71,19 +77,42 @@ cleanup() {
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
+# Mode: plugin (default, Phase 1) or standalone (design §8 step 6). In standalone
+# the config carries a bundled-model llm block (a loopback stub-model standing in
+# for the real GGUF, design §9) and the run is `sandy ask` (the full loop) rather
+# than `sandy run`. Everything the *boundary* behavior depends on stays identical
+# across boundaries; only the where-the-files-live specifics differ (excluded from
+# the signature).
+SANDY_MODE="${SANDY_MODE:-plugin}"
+ASK_GOAL="Summarize EMEA deals"
+
 # write_workspace <physical-dir> <runtime> <fixture-absolute-path> <declared-root>
 # Writes the config + request into <physical-dir>. The config is byte-identical
-# across boundaries EXCEPT two fields that are pure environment specifics (where
-# the workspace physically lives), and BOTH are excluded from the behavioral
-# signature:
+# across boundaries EXCEPT the fields that are pure environment specifics (where
+# the workspace / fixtures physically live), and all of them are excluded from
+# the behavioral signature:
 #   - sandbox.allowed_paths = <declared-root>
 #       Docker: "/ws" (the container mount point); Firejail: the host path.
-#   - the stdio command's fixture path
-#       Docker: /app/conformance/stdio-server.mjs; Firejail: the repo path.
-# The request, mode, llm, network, policy — everything the behavior depends on —
+#   - the stdio command's fixture path (and the stub-model path, standalone)
+#       Docker: /app/conformance/...; Firejail: the repo path.
+# The mode, llm provider, network, policy — everything the behavior depends on —
 # is identical, which is what the cross-boundary assertion is about.
 write_workspace() {
   local ws="$1" runtime="$2" fixture="$3" root="$4"
+  local fixture_dir="${fixture%/*}"
+  local model="${fixture_dir}/stub-model.mjs"
+  local mode llm runfile
+  if [ "$SANDY_MODE" = "standalone" ]; then
+    mode="standalone"
+    # The stub model stands in for the bundled 4-8B model (design §9): a
+    # loopback OpenAI-compatible server, in-sandbox, zero-egress by construction.
+    llm="{ \"provider\": \"local\", \"model\": \"stub\", \"model_path\": \"${model}\", \"engine\": { \"type\": \"llama-server\", \"command\": [\"node\", \"${model}\"], \"host\": \"127.0.0.1\", \"port\": 0 } }"
+    runfile="goal.txt"
+  else
+    mode="plugin"
+    llm="{ \"provider\": \"host\" }"
+    runfile="request.json"
+  fi
   mkdir -p "$ws/reports"
   cat > "$ws/mcp-servers.json" <<JSON
 { "servers": [ { "name": "crm", "transport": "stdio",
@@ -91,17 +120,34 @@ write_workspace() {
   "version": "1.0.0", "capabilities": ["read_deals"], "allowed_tools": ["read_deals"] } ] }
 JSON
   cat > "$ws/sandy.json" <<JSON
-{ "mode": "plugin", "llm": { "provider": "host" },
+{ "mode": "${mode}", "llm": ${llm},
   "sandbox": { "runtime": "${runtime}", "allowed_paths": ["${root}"],
     "allowed_network": [], "max_memory_mb": 512, "max_cpu_percent": 25 },
   "mcp_servers": "./mcp-servers.json", "report_output_dir": "./reports",
   "policy": { "confirmation_required": ["delete","overwrite"], "undo_depth": 5,
     "dry_run_default": false, "audit_payload_logging": false, "ignore_patterns": [] } }
 JSON
-  cat > "$ws/request.json" <<JSON
+  if [ "$SANDY_MODE" = "standalone" ]; then
+    printf '%s' "$ASK_GOAL" > "$ws/$runfile"
+  else
+    cat > "$ws/request.json" <<JSON
 { "goal": "deals", "gather": [ { "id": "deals", "server": "crm", "tool": "read_deals", "args": { "region": "emea" } } ],
   "report": { "title": "EMEA Deals", "file": "emea.md" } }
 JSON
+  fi
+}
+
+# The `sandy <verb> <arg>` invocation for the run step. Plugin: `run <request>`;
+# standalone: `ask <goal...>` (the full loop). The goal is emitted UNQUOTED and
+# word-split by the caller's `$( ... )`; the CLI re-joins the remaining positionals
+# into the goal, so no literal quotes leak into it. $1 = the request-file path
+# (relative to the working dir for Docker, absolute for Firejail).
+run_args() {
+  if [ "$SANDY_MODE" = "standalone" ]; then
+    printf 'ask %s' "$ASK_GOAL"
+  else
+    printf 'run %s' "$1"
+  fi
 }
 
 # run_and_assert <label> <ws> <check.json> <run.json> <report-path>
@@ -144,16 +190,16 @@ if want_docker; then
     set -e
     [ "$RC_CHECK" -eq 0 ] || { cat "$OUT/docker.check.err"; fail "docker check exited ${RC_CHECK}"; }
 
-    log "Docker: sandy run (no external egress)"
+    log "Docker: sandy run/ask (no external egress)"
     set +e
     docker run --rm --network "sandy-matrix-net" -v "${WS_DOCKER}:/ws" -w /ws \
-      "$IMAGE" node /app/bin/sandy.js run request.json --config sandy.json --no-progress --json > "$OUT/docker.run.json" 2> "$OUT/docker.run.err"
+      "$IMAGE" node /app/bin/sandy.js $(run_args "request.json") --config sandy.json --no-progress --json > "$OUT/docker.run.json" 2> "$OUT/docker.run.err"
     RC_RUN=$?
     set -e
-    [ "$RC_RUN" -eq 0 ] || { cat "$OUT/docker.run.err"; fail "docker run exited ${RC_RUN}"; }
+    [ "$RC_RUN" -eq 0 ] || { cat "$OUT/docker.run.err"; fail "docker run/ask exited ${RC_RUN}"; }
 
     assert_behavior "docker" "$OUT/docker.check.json" "$OUT/docker.run.json" "$WS_DOCKER"
-    log "Docker boundary: PASS (check ok, run produced a confined provenance-tracked report)"
+    log "Docker boundary: PASS (check ok, ${SANDY_MODE} run produced a confined provenance-tracked report)"
   fi
 fi
 
@@ -179,15 +225,15 @@ if want_firejail; then
     set -e
     [ "$RC_CHECK" -eq 0 ] || { cat "$OUT/firejail.check.err"; fail "firejail check exited ${RC_CHECK}"; }
 
-    log "Firejail: sandy run (no external egress)"
+    log "Firejail: sandy run/ask (no external egress)"
     set +e
-    run_fj run "$WS_FJ/request.json" --config "$WS_FJ/sandy.json" --no-progress --json > "$OUT/firejail.run.json" 2> "$OUT/firejail.run.err"
+    run_fj $(run_args "$WS_FJ/request.json") --config "$WS_FJ/sandy.json" --no-progress --json > "$OUT/firejail.run.json" 2> "$OUT/firejail.run.err"
     RC_RUN=$?
     set -e
-    [ "$RC_RUN" -eq 0 ] || { cat "$OUT/firejail.run.err"; fail "firejail run exited ${RC_RUN}"; }
+    [ "$RC_RUN" -eq 0 ] || { cat "$OUT/firejail.run.err"; fail "firejail run/ask exited ${RC_RUN}"; }
 
     assert_behavior "firejail" "$OUT/firejail.check.json" "$OUT/firejail.run.json" "$WS_FJ"
-    log "Firejail boundary: PASS (check ok, run produced a confined provenance-tracked report)"
+    log "Firejail boundary: PASS (check ok, ${SANDY_MODE} run produced a confined provenance-tracked report)"
   fi
 fi
 
@@ -217,7 +263,7 @@ if [ "$ran_any" -eq 0 ]; then
   exit 0
 fi
 if [ "$MODE" = "" ]; then
-  log "PASS — sandbox conformance: Docker + Firejail are behaviorally identical"
+  log "PASS — sandbox conformance (${SANDY_MODE}): Docker + Firejail are behaviorally identical"
 else
-  log "PASS — sandbox conformance: the ${MODE} boundary conforms"
+  log "PASS — sandbox conformance (${SANDY_MODE}): the ${MODE} boundary conforms"
 fi

@@ -31,6 +31,13 @@ jobs:
   # The SB-09/10 runtime-agnosticity matrix: the SAME config + request run under
   # Docker and under Firejail. Each leg is self-contained and fail-closed
   # (SANDY_REQUIRE=1) and uploads its behavior signature for the identity job.
+  # The mode dimension (design §8 step 6) proves the guarantees hold for the
+  # standalone service too — the SAME in-sandbox loopback model, SAME config
+  # shape, run under both boundaries:
+  #   plugin     Phase 1: host engine, `sandy run` (the original matrix).
+  #   standalone bundled-model engine (a loopback stub-model), `sandy ask`
+  #              (parse -> run -> narrate). Proves adding a model did not break
+  #              the no-egress / cross-sandbox guarantees (SD-05/06).
   conformance:
     needs: core
     runs-on: ubuntu-latest
@@ -38,9 +45,12 @@ jobs:
       fail-fast: false
       matrix:
         boundary: [docker, firejail]
+        mode: [plugin, standalone]
     env:
       SANDY_MATRIX: ${{ matrix.boundary }}
+      SANDY_MODE: ${{ matrix.mode }}
       SANDY_REQUIRE: "1"
+      SANDY_SIG_DIR: /tmp/sandy-matrix-sigs-${{ matrix.mode }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -52,18 +62,21 @@ jobs:
       - name: Install firejail
         if: matrix.boundary == 'firejail'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends firejail
-      - name: Run sandbox conformance (${{ matrix.boundary }})
+      - name: Run sandbox conformance (${{ matrix.mode }} / ${{ matrix.boundary }})
         run: bash conformance/sandbox-matrix.sh
+      - name: Network-level egress conformance (${{ matrix.mode }} / docker)
+        if: matrix.boundary == 'docker'
+        run: bash conformance/run-docker.sh
       - name: Upload behavior signature
         uses: actions/upload-artifact@v4
         with:
-          name: sandbox-sig-${{ matrix.boundary }}
-          path: /tmp/sandy-matrix-sigs/${{ matrix.boundary }}.sig
+          name: sandbox-sig-${{ matrix.mode }}-${{ matrix.boundary }}
+          path: /tmp/sandy-matrix-sigs-${{ matrix.mode }}/${{ matrix.boundary }}.sig
 
-  # Proves the matrix legs behave identically: download both boundaries'
-  # signatures and require them to be byte-identical. This is the CI-level form
-  # of the in-script cross-boundary assertion (which runs when both boundaries
-  # are present in one process, e.g. locally).
+  # Proves the matrix legs behave identically, per mode: download both
+  # boundaries' signatures for each mode and require them to be byte-identical.
+  # This is the CI-level form of the in-script cross-boundary assertion (which
+  # runs when both boundaries are present in one process, e.g. locally).
   identity:
     needs: conformance
     runs-on: ubuntu-latest
@@ -71,13 +84,23 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: sandbox-sig-docker
-          path: sigs/docker
+          name: sandbox-sig-plugin-docker
+          path: sigs/plugin/docker
       - uses: actions/download-artifact@v4
         with:
-          name: sandbox-sig-firejail
-          path: sigs/firejail
-      - name: Assert identical behavior across boundaries
+          name: sandbox-sig-plugin-firejail
+          path: sigs/plugin/firejail
+      - uses: actions/download-artifact@v4
+        with:
+          name: sandbox-sig-standalone-docker
+          path: sigs/standalone/docker
+      - uses: actions/download-artifact@v4
+        with:
+          name: sandbox-sig-standalone-firejail
+          path: sigs/standalone/firejail
+      - name: Assert identical behavior across boundaries (per mode)
         run: |
-          diff -u sigs/docker/docker.sig sigs/firejail/firejail.sig
-          echo "Docker and Firejail produce identical behavior — enforcer is runtime-agnostic (SB-10)"
+          diff -u sigs/plugin/docker/docker.sig sigs/plugin/firejail/firejail.sig
+          echo "plugin: Docker and Firejail produce identical behavior (SB-10)"
+          diff -u sigs/standalone/docker/docker.sig sigs/standalone/firejail/firejail.sig
+          echo "standalone: Docker and Firejail produce identical behavior (SD-05/06)"

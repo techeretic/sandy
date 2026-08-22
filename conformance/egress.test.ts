@@ -8,6 +8,7 @@ import {
   ConfigError,
   NetworkEgressError,
   NetworkGuard,
+  StubEngine,
   createSandy,
   createTransport,
   guardedFetch,
@@ -66,10 +67,13 @@ function crmServer(url: string): { name: string; transport: "http"; url: string;
   return { name: "crm", transport: "http", url, version: "1.0.0", capabilities: ["read_deals"], allowed_tools: ["read_deals"] };
 }
 
-async function writeConfig(dir: string, opts: { allowedPaths: string[]; url: string; hostport: string }): Promise<string> {
+async function writeConfig(
+  dir: string,
+  opts: { allowedPaths: string[]; url: string; hostport: string; mode?: "plugin" | "standalone" },
+): Promise<string> {
   const manifest = { servers: [crmServer(opts.url)] };
   const main = {
-    mode: "plugin",
+    mode: opts.mode ?? "plugin",
     llm: { provider: "host" },
     sandbox: {
       runtime: "custom",
@@ -191,6 +195,55 @@ describe("egress conformance (in-process): the NetworkGuard is the only egress p
       await sandy.close();
     }
   });
+
+  it(
+    "standalone: a model-present ask run confines ALL egress to the one declared endpoint (SD-05/06)",
+    async () => {
+      // The in-process (Docker-free) leg of the standalone conformance. A
+      // bundled-model engine (here the StubEngine CI double; in the network
+      // harnesses a loopback stub-model) is present, and the full `ask` loop
+      // (parse -> run -> narrate) runs. The egress contract still holds: the
+      // ONLY URL ever dialed is the declared MCP endpoint — the model adds no
+      // egress (its path is loopback to its own process, §4.0).
+      const dir = await ws();
+      const audit = new InMemoryAuditLogger();
+      const engine = new StubEngine({
+        audit,
+        completion: JSON.stringify({
+          goal: "Summarize EMEA deals",
+          gather: [{ id: "deals", server: "crm", tool: "read_deals", args: { region: "emea" } }],
+          report: { title: "EMEA Deals", file: "emea.md" },
+        }),
+      });
+      // mode "standalone" + the injected engine stands in for the bundled model.
+      const cfg = await writeConfig(dir, { allowedPaths: [dir], url: ep.url, hostport: ep.hostport, mode: "standalone" });
+      const { hit, fn } = recordingFetch();
+
+      const sandy = await createSandy({
+        sandyPath: cfg,
+        auditFile: path.join(dir, "audit", "standalone-egress.jsonl"),
+        transportFactory: (server) =>
+          createTransport(server, new SecretResolver({}), new NetworkGuard([ep.hostport]), fn),
+        detection: () => ({ runtime: "docker" as const, evidence: ["test"] }),
+        engine,
+      });
+      try {
+        const result = await sandy.ask("Summarize EMEA deals");
+        expect(result.plan.source).toBe("model");
+        expect(result.claims).toHaveLength(1);
+        expect(result.gaps).toEqual([]);
+        // Every model invocation (parse + narrate) was recorded (AU-01).
+        expect(audit.events().filter((e: AuditEvent) => e.type === "model_invocation").length).toBeGreaterThanOrEqual(1);
+        // The egress contract: only the declared endpoint was ever dialed.
+        expect(hit.length).toBeGreaterThan(0);
+        for (const u of hit) {
+          expect(new URL(u).host).toBe(ep.hostport);
+        }
+      } finally {
+        await sandy.close();
+      }
+    },
+  );
 
   it("the loader fails closed on a remote endpoint not in allowed_network (VPN-02, config-time)", async () => {
     const dir = await ws();

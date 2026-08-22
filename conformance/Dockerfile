@@ -11,6 +11,10 @@ COPY dist ./dist
 COPY bin ./bin
 # ep-server.mjs: the HTTP MCP endpoint for the egress harness.
 # stdio-server.mjs: the stdio MCP server for the sandbox matrix (no network).
+# stub-model.mjs: a loopback OpenAI-compatible stand-in for the bundled model
+#   (standalone conformance, design §9) — lets `sandy ask` run the full loop
+#   (parse -> run -> narrate) with no real model, no GPU, and no external egress.
 COPY conformance/ep-server.mjs ./conformance/ep-server.mjs
 COPY conformance/stdio-server.mjs ./conformance/stdio-server.mjs
+COPY conformance/stub-model.mjs ./conformance/stub-model.mjs
 ENV NODE_ENV=production
