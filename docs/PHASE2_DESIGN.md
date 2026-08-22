@@ -36,11 +36,24 @@ OpenAI-compatible stand-in for the bundled GGUF, design §9) lets `sandy ask` dr
 the full loop with no real model and no external egress. Proven byte-identical
 across Docker + Firejail for both modes, with the egress harness's three
 assertions (EP hit / external blocked / undeclared fails closed) holding with the
-model present, plus an in-process standalone egress leg (`conformance/egress.test.ts`:
-a `standalone` config + injected model engine runs the full `ask` loop and every
-dialed URL is the one declared endpoint). 164/164 tests, no model or GPU required.
-See `docs/DIARY.md`
-2026-08-21 and 2026-08-22._
+ model present, plus an in-process standalone egress leg (`conformance/egress.test.ts`:
+ a `standalone` config + injected model engine runs the full `ask` loop and every
+ dialed URL is the one declared endpoint). The stub-model path stays CI-runnable
+ with no model or GPU. **Real-model proof (2026-08-22):** the standalone path was
+ then run against a **real** bundled model — Qwen3-4B-Instruct-2507 (Q4_K_M,
+ Apache-2.0) via llama.cpp `llama-server` (Vulkan, GPU) — **inside a no-egress
+ Firejail jail**: the model planned (validated against the legal tool catalog), the
+ MCP tool ran, a provenance-tracked report was written, the model narrated
+ (clearly labeled, SD-06), usage was audited, and `engine.close()` reaped the model
+ (no orphan). Along the way a real integration bug was fixed: `LlamaCppEngine`
+ discovered the model's port from `child.stdout`, but the real `llama-server` logs
+ the `listening on http://host:PORT` line to **stderr** — it now pipes and drains
+ both streams and matches the listen URL specifically. This also **settled the three
+ open §7 decisions with code** (distribution → docs + `scripts/provision-model.sh`;
+ default model → Qwen3-4B-Instruct-2507 Q4_K_M; resource limits → `max_cpu_percent`
+ mapped to a real `--threads` cap via `threadsForCpuPercent`, hard ceiling = the
+ service manager's cgroup). See `docs/MODEL.md` and `docs/DIARY.md` 2026-08-21 and
+ 2026-08-22 (incl. the afternoon real-model entry). **169/169 tests.**_
 
 _**Review note (2026-08-20):** the first draft was reviewed against the actual
 code. One of the review's concerns turned out to be based on a false premise and
