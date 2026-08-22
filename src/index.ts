@@ -146,6 +146,7 @@ export {
 } from "./sandy.js";
 export {
   createLlmEngine,
+  threadsForCpuPercent,
   HostLlmEngine,
   LlamaCppEngine,
   RemoteEngine,

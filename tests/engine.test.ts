@@ -14,6 +14,7 @@ import {
   RemoteEngine,
   StubEngine,
   createLlmEngine,
+  threadsForCpuPercent,
   InMemoryAuditLogger,
   type AuditEvent,
   type LlmConfig,
@@ -27,8 +28,11 @@ const modelEvents = (a: ReturnType<typeof audit>) =>
 
 /**
  * A fake `llama-server` child process. The real engine attaches its
- * stdout/error/exit listeners AFTER the spawn factory returns, so emit/kill are
- * deferred to the next tick (like a real async subprocess) to avoid racing them.
+ * stdout/stderr/error/exit listeners AFTER the spawn factory returns, so
+ * emit/kill are deferred to the next tick (like a real async subprocess) to
+ * avoid racing them. Both stdout AND stderr are modeled as readable streams
+ * because the engine pipes both: the real `llama-server` announces its port on
+ * stderr, while the conformance stub writes it to stdout.
  */
 class FakeChild {
   readonly stdout: {
@@ -36,20 +40,36 @@ class FakeChild {
     off: (ev: string, cb: (d: Buffer) => void) => void;
     write: (chunk: string) => void;
   };
-  readonly stderr: { write: (chunk: string) => void };
+  readonly stderr: {
+    on: (ev: string, cb: (d: Buffer) => void) => void;
+    off: (ev: string, cb: (d: Buffer) => void) => void;
+    write: (chunk: string) => void;
+  };
   readonly exitCode: number | null = null;
   readonly signalCode: NodeJS.Signals | null = null;
   private readonly em = new EventEmitter();
   killedSignals: string[] = [];
+  private readonly stdoutEm = new EventEmitter();
+  private readonly stderrEm = new EventEmitter();
+  /** Which stream the "listening" line is announced on ("stdout" = the
+   *  conformance stub; "stderr" = the real llama-server). */
+  private readonly readyStream: "stdout" | "stderr";
 
-  constructor(private readonly lines: string[] = ["Server listening at http://127.0.0.1:8081"]) {
-    const stdoutEm = new EventEmitter();
+  constructor(
+    private readonly lines: string[] = ["Server listening at http://127.0.0.1:8081"],
+    readyStream: "stdout" | "stderr" = "stdout",
+  ) {
+    this.readyStream = readyStream;
     this.stdout = {
-      on: (ev, cb) => stdoutEm.on(ev, cb),
-      off: (ev, cb) => stdoutEm.off(ev, cb),
-      write: (chunk) => stdoutEm.emit("data", Buffer.from(chunk)),
+      on: (ev, cb) => this.stdoutEm.on(ev, cb),
+      off: (ev, cb) => this.stdoutEm.off(ev, cb),
+      write: (chunk) => this.stdoutEm.emit("data", Buffer.from(chunk)),
     };
-    this.stderr = { write: () => {} };
+    this.stderr = {
+      on: (ev, cb) => this.stderrEm.on(ev, cb),
+      off: (ev, cb) => this.stderrEm.off(ev, cb),
+      write: (chunk) => this.stderrEm.emit("data", Buffer.from(chunk)),
+    };
   }
 
   on(ev: string, cb: (...a: unknown[]) => void): this {
@@ -66,10 +86,12 @@ class FakeChild {
     setTimeout(() => this.em.emit("exit", null, "SIGTERM"), 0);
     return true;
   }
-  /** Emit the stdout lines (the port the test reads). Deferred. */
+  /** Emit the ready lines on the configured stream (the port the test reads).
+   *  Deferred. */
   emitReady(): void {
+    const em = this.readyStream === "stdout" ? this.stdoutEm : this.stderrEm;
     for (const line of this.lines) {
-      setTimeout(() => this.stdout.write(line + "\n"), 0);
+      setTimeout(() => em.emit("data", Buffer.from(line + "\n")), 0);
     }
   }
   emitError(msg: string): void {
@@ -177,6 +199,7 @@ describe("LlamaCppEngine (local, in-sandbox loopback)", () => {
         return child.asChild();
       },
       fetchImpl: fake.fn,
+      logSink: () => {},
     });
     await e.start();
     expect(e.status().status).toBe("ready");
@@ -191,6 +214,87 @@ describe("LlamaCppEngine (local, in-sandbox loopback)", () => {
     // close() kills the child process (no orphan).
     await e.close();
     expect(child.killedSignals.length).toBeGreaterThan(0);
+  });
+
+  it("discovers the port when the server announces it on STDERR (the real llama-server)", async () => {
+    // The real `llama-server` logs to stderr, not stdout. A prior engine read
+    // only stdout, so a real model would time out here. This pins the fix.
+    const child = new FakeChild(
+      [
+        "0.00.128.552 W srv  llama_server: CORS is set to allow all origins ('*')",
+        "0.02.831.816 I srv  llama_server: listening on http://127.0.0.1:37587",
+      ],
+      "stderr",
+    );
+    const fake = fakeFetch((url) => {
+      if (url.endsWith("/health")) return new Response("ok", { status: 200 });
+      return completionResponse("plan {}", 4, 2);
+    });
+    const e = new LlamaCppEngine({
+      audit: audit(),
+      modelPath: EXISTING_FILE,
+      model: "m",
+      spawnFactory: () => {
+        child.emitReady();
+        return child.asChild();
+      },
+      fetchImpl: fake.fn,
+      // Discard the model's log output (the default would write it to stderr).
+      logSink: () => {},
+    });
+    await e.start();
+    expect(e.status().status).toBe("ready");
+    expect(e.status().port).toBe(37587);
+    const r = await e.invoke({ prompt: "plan a report" });
+    expect(r.completion).toBe("plan {}");
+    await e.close();
+    expect(child.killedSignals.length).toBeGreaterThan(0);
+  });
+
+  it("maps the CPU cap to a --threads budget in the spawn argv (§4.5)", async () => {
+    const child = new FakeChild(["Server listening at http://127.0.0.1:8081"], "stderr");
+    const fake = fakeFetch((url) =>
+      url.endsWith("/health") ? new Response("ok", { status: 200 }) : completionResponse("{}", 1, 1),
+    );
+    let argv: string[] = [];
+    const e = new LlamaCppEngine({
+      audit: audit(),
+      modelPath: EXISTING_FILE,
+      model: "m",
+      maxThreads: 4,
+      spawnFactory: (a) => {
+        argv = a;
+        child.emitReady();
+        return child.asChild();
+      },
+      fetchImpl: fake.fn,
+      logSink: () => {},
+    });
+    await e.start();
+    expect(e.status().status).toBe("ready");
+    const i = argv.indexOf("--threads");
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(argv[i + 1]).toBe("4");
+    await e.close();
+  });
+});
+
+describe("threadsForCpuPercent (§4.5: CPU cap -> thread budget)", () => {
+  it("maps a percentage of logical CPUs down to a thread count, floor >= 1", () => {
+    expect(threadsForCpuPercent(100, 16)).toBe(16); // no effective cap
+    expect(threadsForCpuPercent(50, 16)).toBe(8);
+    expect(threadsForCpuPercent(25, 16)).toBe(4);
+    expect(threadsForCpuPercent(50, 8)).toBe(4);
+    expect(threadsForCpuPercent(20, 8)).toBe(1); // 1.6 -> floor 1
+    expect(threadsForCpuPercent(1, 8)).toBe(1); // rounds down to >=1
+    expect(threadsForCpuPercent(3, 8)).toBe(1); // 0.24 -> floor 0 -> clamped to 1
+  });
+  it("fails to a minimum of 1 thread on invalid input (never 0/negative)", () => {
+    expect(threadsForCpuPercent(0, 16)).toBe(1);
+    expect(threadsForCpuPercent(-5, 16)).toBe(1);
+    expect(threadsForCpuPercent(50, 0)).toBe(1);
+    expect(threadsForCpuPercent(NaN, 16)).toBe(1);
+    expect(threadsForCpuPercent(50, NaN)).toBe(1);
   });
 });
 

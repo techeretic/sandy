@@ -4,7 +4,28 @@ _Last updated 2026-08-22. Read this together with `docs/DIARY.md` (chronological
 
 ## Status
 
-**Phase 1 and Phase 2 are both complete.** The core library is built, tested, composed into a runnable `sandy` binary, wired into a Claude Code / Codex plugin, and the standalone service (bundled-LLM mode) is built and proven (164/164 tests, typecheck + build green). The launch success criterion — "zero network egress outside declared MCP endpoints" — is proven in-process and at the network level in Docker, **and the enforcer is proven runtime-agnostic for BOTH modes**: the same config + request under Docker and Firejail produce byte-identical behavior for **plugin** (host engine, `sandy run`) **and standalone** (bundled model, `sandy ask`) (CI matrix). The host LLM is the engine in plugin mode (PL-03, usage recorded via `sandy.model.usage`); in standalone mode the bundled model is the engine behind the same `LlmEngine` seam.
+**Phase 1 and Phase 2 are both complete, and the real bundled model is proven end-to-end.** The core library is built, tested, composed into a runnable `sandy` binary, wired into a Claude Code / Codex plugin, and the standalone service (bundled-LLM mode) is built, proven with the stub model, **and now proven with a real model** (Qwen3-4B-Instruct-2507 on an RTX 5090) inside a no-egress sandbox (169/169 tests, typecheck + build green). The launch success criterion — "zero network egress outside declared MCP endpoints" — is proven in-process and at the network level in Docker, **and the enforcer is proven runtime-agnostic for BOTH modes**: the same config + request under Docker and Firejail produce byte-identical behavior for **plugin** (host engine, `sandy run`) **and standalone** (bundled model, `sandy ask`) (CI matrix). The host LLM is the engine in plugin mode (PL-03, usage recorded via `sandy.model.usage`); in standalone mode the bundled model is the engine behind the same `LlmEngine` seam.
+
+**The real bundled model is now proven end-to-end (2026-08-22).** The stub-model
+conformance had proven the *path*; this session shipped a real model against it:
+provisioned llama.cpp (Vulkan build, GPU on the RTX 5090 with no CUDA toolkit) +
+Qwen3-4B-Instruct-2507 (Q4_K_M, Apache-2.0, SHA256-pinned) via
+`scripts/provision-model.sh`, and ran a real `sandy ask` **inside a no-egress
+Firejail jail** — the real model planned (validated against the legal tool
+catalog), the MCP tool ran, a provenance-tracked report was written to the
+confined dir, the model narrated (clearly labeled, SD-06), token usage was
+audited, and the model process was reaped (no orphan). Along the way it fixed a
+**real integration bug**: `LlamaCppEngine` discovered the model's port by reading
+`child.stdout`, but the real `llama-server` logs the `listening on
+http://host:PORT` line to **stderr** — so a real model would have timed out (the
+stub wrote to stdout, hiding it). The engine now pipes **and drains both**
+streams and matches the listen URL specifically. It also settled the three open
+design §7 decisions with code: the documented default model, the docs-based
+distribution (out-of-band provisioning, no runtime download), and the §4.5
+resource-limit scope (`sandbox.max_cpu_percent` → a real llama.cpp `--threads`
+cap via `threadsForCpuPercent`; the hard memory ceiling is the service manager's
+cgroup). See `docs/MODEL.md`, `docs/DIARY.md` 2026-08-22 (afternoon), and
+`docs/PHASE2_DESIGN.md` §7. **169/169 tests, typecheck + build green.**
 
 **Phase 2 (2026-08-21 → 2026-08-22), design §8 steps 1–6, all done:**
 - (1–2) Model backends behind the `LlmEngine` seam — `LlamaCppEngine` (SD-02), `RemoteEngine` (SD-04), `StubEngine` (CI double), the lifecycle contract wired into `Sandy.close()`, additive `llm` config, engine health in `check()`.
@@ -123,7 +144,7 @@ The rest of the standalone service, all committed and proven. See `docs/DIARY.md
 - Update `docs/DIARY.md` per work block; keep `README.md` Status section current.
 
 ## Suggested first action for the next session
-**Both Phase 1 and Phase 2 are complete** (design §8 steps 1–6 all done, committed, 164/164 tests, typecheck + build green, and the no-egress / cross-sandbox conformance proven for both plugin and standalone modes). Read `docs/PHASE2_DESIGN.md` (now fully implemented) and `docs/DIARY.md` 2026-08-22 for the full write-up. Suggested next directions (no code is blocking):
-- **Settle the open design §7 decisions** that remain genuinely undecided: (1) model + runtime distribution — docs-based install of `llama-server` + GGUF (leaning), a `sandy model fetch` helper, or a platform bundle; (2) the documented default 4–8B model (+ license/size check); (3) resource-limit enforcement scope (§4.5) — map caps to llama.cpp knobs now and let the supervisor enforce the hard ceiling, or implement an in-service hard bound.
-- **Ship a real bundled model end-to-end** (the stub-model conformance already proves the path): pick the default model, add a provisioning doc/script, and run the standalone conformance against a real GGUF on a GPU/CPU box to validate SD-02 quality + the SD-06 "quality may vary" note.
+**Phase 1, Phase 2, and the real-model end-to-end are all complete** (design §8 steps 1–6 done, the design §7 decisions settled with code, 169/169 tests, typecheck + build green, the no-egress / cross-sandbox conformance proven for both plugin and standalone modes, **and a real bundled model proven inside a no-egress sandbox**). Read `docs/PHASE2_DESIGN.md` (now fully implemented + §7 settled), `docs/MODEL.md` (provisioning + the default model), and `docs/DIARY.md` 2026-08-22 (afternoon) for the full write-up. Suggested next directions (no code is blocking):
 - **The still-deferred product items** (per DECISIONS.md / PRD §10): write-back (Q6 — gate contract exists; needs the admin write allowlist + an approval flow), extra report formats (HTML/DOCX/XLSX/PDF), and recurring report templates (RG-08).
+- **Optional hardening of the real-model path:** add a `SANDY_REAL_MODEL` opt-in leg to the sandbox matrix that runs `sandy ask` against a real GGUF when one is provisioned (the stub-model leg already runs in CI); or add the in-service hard memory bound (cgroup) if the team wants the ceiling in-process rather than at the supervisor.
+- **Multi-turn / agentic planning** beyond the single gather→report pass (a design §10 non-goal for v2; the loop's validate-then-run seam is what it would extend).

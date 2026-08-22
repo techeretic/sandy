@@ -178,6 +178,34 @@ export class HostLlmEngine implements LlmEngine {
 
 // --- LlamaCppEngine (Phase 2, local) ----------------------------------------
 
+/** The listen URL a model server prints on startup, its port captured.
+ *  Matches both the real `llama-server` ("listening on http://127.0.0.1:37587",
+ *  on stderr) and the conformance stub ("Server listening at
+ *  http://127.0.0.1:8081", on stdout). The host is either a bracketed IPv6
+ *  address or a normal hostname/IPv4, then ":<port>". Anchoring to the
+ *  scheme+host means an unrelated ":digits" token in the log (e.g. a token id)
+ *  can never be mistaken for the port. */
+const LISTEN_URL_PORT_RE = /https?:\/\/(?:\[[^\]]+\]|[^\s/:]+):(\d{2,5})/;
+
+/**
+ * Map a declared CPU cap (a percentage of the host's logical CPUs) to a
+ * llama.cpp `--threads` value. This is the §4.5 "map caps to llama.cpp knobs"
+ * lever: it only ever REDUCES the thread budget a model may use (100% → all
+ * cores, no effective cap), consistent with tighten-never-loosen. The HARD
+ * ceiling is the service manager's cgroup; this is the soft, in-service knob.
+ */
+export function threadsForCpuPercent(cpuPercent: number, cpuCount: number): number {
+  if (
+    !Number.isFinite(cpuPercent) ||
+    cpuPercent <= 0 ||
+    !Number.isFinite(cpuCount) ||
+    cpuCount <= 0
+  ) {
+    return 1;
+  }
+  return Math.max(1, Math.floor((cpuCount * cpuPercent) / 100));
+}
+
 export interface LlamaCppEngineOptions {
   audit: AuditLogger;
   /** Model file (GGUF). Must exist at start() (fail-closed). */
@@ -190,10 +218,21 @@ export interface LlamaCppEngineOptions {
   host?: string;
   /** Port; 0 = pick a free one. Default 0. */
   port?: number;
+  /**
+   * Cap the model's CPU threads (llama.cpp `--threads`). Maps the declared
+   * sandbox `max_cpu_percent` to a real startup lever (§4.5): the threads the
+   * model may use is a fraction of the host's logical CPUs. The HARD ceiling
+   * is the service manager's cgroup; this is the soft, in-service knob.
+   * Undefined = let llama.cpp pick.
+   */
+  maxThreads?: number;
   /** Injectable for tests: a fake spawn. */
-  spawnFactory?: (argv: string[], opts: { stdio: ["ignore", "pipe", "inherit"] }) => ChildProcess;
+  spawnFactory?: (argv: string[], opts: { stdio: ["ignore", "pipe", "pipe"] }) => ChildProcess;
   /** Injectable for tests: a fake fetch. */
   fetchImpl?: FetchLike;
+  /** Where the model server's stdout/stderr go. Default the process stderr (so
+   *  the model's logs stay visible). Injectable for tests (e.g. a no-op). */
+  logSink?: (chunk: string) => void;
   /** How long to wait for the server to become ready. Default 15000ms. */
   readyTimeoutMs?: number;
   /** Per-invoke timeout. Default 60000ms. */
@@ -216,8 +255,10 @@ export class LlamaCppEngine implements LlmEngine {
   private readonly command: string[];
   private readonly host: string;
   private readonly requestedPort: number;
-  private readonly spawnFactory: (argv: string[], opts: { stdio: ["ignore", "pipe", "inherit"] }) => ChildProcess;
+  private readonly maxThreads?: number;
+  private readonly spawnFactory: (argv: string[], opts: { stdio: ["ignore", "pipe", "pipe"] }) => ChildProcess;
   private readonly fetchImpl: FetchLike;
+  private readonly logSink: (chunk: string) => void;
   private readonly readyTimeoutMs: number;
   private readonly invokeTimeoutMs: number;
   private readonly now: () => number;
@@ -237,9 +278,11 @@ export class LlamaCppEngine implements LlmEngine {
     this.command = options.command ?? ["llama-server"];
     this.host = options.host ?? "127.0.0.1";
     this.requestedPort = options.port ?? 0;
+    this.maxThreads = options.maxThreads;
     this.spawnFactory =
       options.spawnFactory ?? ((argv, opts) => spawn(argv[0]!, argv.slice(1), opts));
     this.fetchImpl = options.fetchImpl ?? (globalThis.fetch as FetchLike);
+    this.logSink = options.logSink ?? ((chunk) => process.stderr.write(chunk));
     this.readyTimeoutMs = options.readyTimeoutMs ?? 15000;
     this.invokeTimeoutMs = options.invokeTimeoutMs ?? 60000;
     this.now = options.now ?? Date.now;
@@ -274,7 +317,13 @@ export class LlamaCppEngine implements LlmEngine {
       "--port",
       String(this.requestedPort),
     ];
-    this.child = this.spawnFactory(argv, { stdio: ["ignore", "pipe", "inherit"] });
+    // §4.5: map the declared CPU cap to a real lever. A percentage of the host's
+    // logical CPUs becomes a `--threads` cap on the model. The hard ceiling is
+    // the service manager's cgroup; this is the soft in-service knob.
+    if (this.maxThreads !== undefined && this.maxThreads > 0) {
+      argv.push("--threads", String(this.maxThreads));
+    }
+    this.child = this.spawnFactory(argv, { stdio: ["ignore", "pipe", "pipe"] });
     const child = this.child;
 
     child.on("error", (err) => {
@@ -289,6 +338,16 @@ export class LlamaCppEngine implements LlmEngine {
         this.detail = "model server exited unexpectedly";
       }
     });
+
+    // A real `llama-server` logs (including the "listening on http://host:PORT"
+    // line the port discovery below needs) to STDERR, not stdout. Both streams
+    // are therefore piped, scanned for the port, and drained for the child's
+    // whole life so a long-running model's log output never fills a pipe buffer
+    // and blocks the process. The default sink is the process stderr, so the
+    // model's logs stay visible to the operator (the conformance stub writes its
+    // banner to stdout, which is handled the same way).
+    attachStreamLog(child.stdout, this.logSink);
+    attachStreamLog(child.stderr, this.logSink);
 
     const port = await this.discoverPort(child);
     if (!port) {
@@ -306,23 +365,46 @@ export class LlamaCppEngine implements LlmEngine {
   }
 
   /** Find the port the server bound: a fixed port if requested, else parse the
-   *  server's stdout for the address it printed. */
+   *  listen URL the server prints. The real `llama-server` prints
+   *  "listening on http://host:port" to STDERR; the conformance stub prints
+   *  "Server listening at http://host:port" to STDOUT — so scan BOTH streams
+   *  (a single combined buffer, to catch the address split across a chunk
+   *  boundary). We match the listen URL specifically (not a bare ":port" token)
+   *  so an unrelated log line can never masquerade as the port, and a server
+   *  that never prints one fails closed (a timeout → degraded, not a guess). */
   private async discoverPort(child: ChildProcess): Promise<number> {
     if (this.requestedPort !== 0) return this.requestedPort;
+    // child.stdout / child.stderr are `Readable | null`; keep the readable ones.
+    const streams = ([child.stdout, child.stderr] as Array<ReadableStreamLike | null>).filter(
+      (s): s is ReadableStreamLike => s !== null,
+    );
+    let buffer = "";
+    let resolved = false;
     return await new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        child.stdout?.off("data", onData);
-        resolve(0);
-      }, this.readyTimeoutMs);
-      const onData = (d: Buffer) => {
-        const m = /:(\d{2,5})\b/.exec(d.toString());
-        if (m) {
-          clearTimeout(timer);
-          child.stdout?.off("data", onData);
-          resolve(Number(m[1]));
+      const finish = (port: number) => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timer);
+        for (const s of streams) {
+          s.off("data", onData);
+          s.off("close", onClose);
+          s.off("error", onError);
         }
+        resolve(port);
       };
-      child.stdout?.on("data", onData);
+      const onData = (d: unknown) => {
+        buffer += Buffer.isBuffer(d) ? d.toString("utf8") : String(d);
+        const m = LISTEN_URL_PORT_RE.exec(buffer);
+        if (m) finish(Number(m[1]));
+      };
+      const onClose = () => finish(0);
+      const onError = () => finish(0);
+      const timer = setTimeout(() => finish(0), this.readyTimeoutMs);
+      for (const s of streams) {
+        s.on("data", onData);
+        s.on("close", onClose);
+        s.on("error", onError);
+      }
     });
   }
 
@@ -632,6 +714,8 @@ export interface CreateLlmEngineOptions {
   guard?: NetworkGuard;
   /** Resolved bearer token for a remote endpoint (from ${ENV_REF}). */
   bearerToken?: string;
+  /** Cap on the local model's CPU threads (§4.5); undefined = uncapped. */
+  maxThreads?: number;
   /** Injectable for tests: a fake fetch handed to a real engine. */
   fetchImpl?: FetchLike;
   /** Injectable for tests: a fake spawn handed to the local engine. */
@@ -662,6 +746,7 @@ export function createLlmEngine(
       command: engine?.command,
       host: engine?.host,
       port: engine?.port,
+      maxThreads: options.maxThreads,
       spawnFactory: options.spawnFactory,
       fetchImpl: options.fetchImpl,
     });
@@ -684,6 +769,25 @@ export function createLlmEngine(
 }
 
 // --- utilities --------------------------------------------------------------
+
+/** The subset of a piped child stream the engine needs (for test fakes). */
+type ReadableStreamLike = {
+  on: (ev: string, cb: (...a: unknown[]) => void) => unknown;
+  off: (ev: string, cb: (...a: unknown[]) => void) => unknown;
+};
+
+/**
+ * Keep a piped child stream from blocking the model process. Once the port is
+ * discovered the stream is still open for the child's whole life, so a
+ * long-running model's logs must be read (or drained) continuously; otherwise
+ * the OS pipe buffer fills and the model blocks on a write. Forward each chunk
+ * to the log sink (the process stderr by default) — this both drains the pipe
+ * and keeps the model's output visible.
+ */
+function attachStreamLog(stream: ReadableStreamLike | null | undefined, sink: (chunk: string) => void): void {
+  if (stream === null || stream === undefined) return;
+  stream.on("data", (d: unknown) => sink(Buffer.isBuffer(d) ? d.toString("utf8") : String(d)));
+}
 
 async function sleep(ms: number): Promise<void> {
   await new Promise((r) => setTimeout(r, ms));

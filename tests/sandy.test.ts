@@ -1,4 +1,5 @@
 import { mkdtemp, rm, writeFile, readFile as fsRead } from "node:fs/promises";
+import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -54,6 +55,9 @@ async function writeConfig(
     runtime?: string;
     crmCommand?: string[];
     extraServers?: unknown[];
+    llm?: Record<string, unknown>;
+    mode?: string;
+    maxCpuPercent?: number;
   },
 ): Promise<string> {
   const crm = {
@@ -66,14 +70,14 @@ async function writeConfig(
   };
   const manifest = { servers: [crm, ...(opts.extraServers ?? [])] };
   const main = {
-    mode: "plugin",
-    llm: { provider: "host" },
+    mode: opts.mode ?? "plugin",
+    llm: opts.llm ?? { provider: "host" },
     sandbox: {
       runtime: opts.runtime ?? "custom",
       allowed_paths: opts.allowedPaths,
       allowed_network: [],
       max_memory_mb: 512,
-      max_cpu_percent: 25,
+      max_cpu_percent: opts.maxCpuPercent ?? 25,
     },
     mcp_servers: "./mcp-servers.json",
     report_output_dir: "./reports",
@@ -339,6 +343,71 @@ describe("createSandy: engine wiring (PRD §7)", () => {
       expect(report.engine.status).toBe("degraded");
       expect(report.engine.error).toBe("model process died");
       expect(report.ok).toBe(false); // a degraded engine is a reported, not crash, state
+    } finally {
+      await closeAll([sandy]);
+    }
+  });
+
+  it("maps the sandbox CPU cap to the model's --threads budget (local engine, §4.5)", async () => {
+    const ws = await tmpWorkspace();
+    const modelPath = fileURLToPath(new URL("../package.json", import.meta.url));
+    const spawnArgs: string[] = [];
+    // A fake model server: report a fixed port on stderr (like the real
+    // llama-server) so start()'s port discovery resolves, and answer /health.
+    const child = {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      on: (() => child) as any,
+      once: (() => child) as any,
+      kill: () => {
+        child.stderr.emit("close");
+        return true;
+      },
+      exitCode: null,
+      signalCode: null,
+    };
+    const cfg = await writeConfig(ws, {
+      allowedPaths: [ws],
+      mode: "standalone",
+      maxCpuPercent: 25,
+      llm: {
+        provider: "local",
+        model: "test-model",
+        model_path: modelPath,
+        engine: { host: "127.0.0.1", port: 9999 }, // fixed port -> no discovery needed
+      },
+    });
+    const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }]);
+    inMemServers.push(crm);
+    const fetchImpl = (async (url: string) =>
+      url.includes("/health")
+        ? new Response("ok", { status: 200 })
+        : new Response(
+            JSON.stringify({
+              choices: [{ message: { content: "{}" } }],
+              usage: { prompt_tokens: 1, completion_tokens: 1 },
+            }),
+            { status: 200 },
+          )) as typeof fetch;
+    const sandy = await createSandy({
+      sandyPath: cfg,
+      transportFactory: () => crm.transport,
+      detection: pinnedDetection,
+      engineSpawn: (argv) => {
+        spawnArgs.push(...argv);
+        return child as any;
+      },
+      engineFetch: fetchImpl,
+    });
+    try {
+      expect(sandy.engine.provider).toBe("local");
+      await sandy.engine.start();
+      const i = spawnArgs.indexOf("--threads");
+      expect(i).toBeGreaterThanOrEqual(0);
+      const cpusCount = (await import("node:os")).cpus().length;
+      expect(spawnArgs[i + 1]).toBe(
+        String(Math.max(1, Math.floor((cpusCount * 25) / 100))),
+      );
     } finally {
       await closeAll([sandy]);
     }

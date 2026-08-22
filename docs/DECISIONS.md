@@ -13,6 +13,9 @@ Answers to PRD §13 open questions, captured 2026-08-17.
 | 7 | MCP server versioning | **Pin exact versions in `mcp-servers.json`; updates are config changes reviewed in VCS.** | Fits the admin-controlled, read-only-at-runtime registry (MCP-06) and locked-down deployments. |
 | 8 | Long-running tasks | **Session-scoped only in v1.** | Re-runnable report templates (RG-08, Phase 2) cover the recurring case; no persistence/resumption in v1. |
 | 9 | MCP server authoring | **Include scaffolding tools.** | Lets platform teams wrap internal services as MCP servers; ships alongside the config schemas, not in the model's runtime path. |
+| 10 | Model + runtime distribution (Phase 2, design §7 #1) | **Docs-based install + `scripts/provision-model.sh` helper** (SHA256-pinned, fail-closed on mismatch). No runtime download. | Install-time, out-of-band step; air-gap-friendly (copy the file over); keeps no download logic in the security-relevant runtime path. |
+| 11 | Default bundled model (Phase 2, design §7 #2) | **Qwen3-4B-Instruct-2507, Q4_K_M GGUF** (~2.4GB, Apache-2.0). | An instruct (chat/agent) model in the 4–8B class; license/size check cleared; proven end-to-end in-sandbox with a real `sandy ask`. |
+| 12 | Model resource-limit scope (Phase 2, §4.5) | **Map caps to real levers; hard ceiling = service-manager cgroup.** `max_cpu_percent` → llama.cpp `--threads` budget (`threadsForCpuPercent`); hard memory bound is the supervisor's cgroup. | CPU cap is a genuine in-service lever (tighten-never-loosen: 100% = no flag, lower = fewer threads); the hard memory ceiling belongs to the process supervisor, so it is documented, not silently unbounded. |
 
 ## Consequences
 

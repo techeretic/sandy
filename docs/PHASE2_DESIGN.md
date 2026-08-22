@@ -432,17 +432,26 @@ service adds a REST surface for a UI / other local tools.
   carries `responseFormat: "json"` and an optional `jsonSchema`; both backends
   forward them as `response_format` (`json_object` / `json_schema`).
 
-**Still open (need a decision before build):**
-1. **Model + runtime distribution.** How does the user get `llama-server` + the
-   GGUF? (a) docs say "install llama.cpp and set `model_path`", (b) a
-   `sandy model fetch <name>` helper that downloads from a configured source, or
-   (c) a platform team bundles it. **Leaning (a) for v2** — simplest,
-   air-gap-friendly (the team ships the file), no download logic in the runtime.
-2. **Default model.** Which 4–8B instruct model is the documented default?
-   (Needs a pick + a license/size check.) Not blocking the architecture.
-3. **Resource-limit enforcement scope (§4.5).** Map caps to llama.cpp knobs now
-    and let the supervisor enforce the hard ceiling (leaning), or implement the
-    in-service hard bound in v2?
+**Settled (2026-08-22, validated with a real model):**
+1. **Model + runtime distribution** → **(a) docs-based install + an
+   `scripts/provision-model.sh` helper** (SHA256-pinned, fail-closed on
+   mismatch). The runtime never downloads a model — provisioning is an
+   install-time, out-of-band step (air-gap-friendly; the file is copied onto the
+   host). See `docs/MODEL.md`.
+2. **Default model** → **Qwen3-4B-Instruct-2507, Q4_K_M GGUF** (~2.4GB,
+   **Apache-2.0**). An instruct (chat/agent) model in the 4–8B class; the
+   license/size check is cleared. Proven end-to-end: a real `sandy ask` against
+   this model (Vulkan/GPU on an RTX 5090, in-sandbox, zero egress) produced a
+   model-planned run, a provenance-tracked report, and a labeled narrative.
+   See `docs/MODEL.md`.
+3. **Resource-limit enforcement scope (§4.5)** → **map caps to real levers now;
+   the hard ceiling is the service manager's cgroup.** `sandbox.max_cpu_percent`
+   is mapped to a llama.cpp `--threads` budget for the local model
+   (`threadsForCpuPercent` in `src/engine.ts`, wired in `createSandy`); a cap of
+   100 passes no flag (no effective limit), any lower value reduces the budget
+   (tighten-never-loosen). The hard memory ceiling is the supervisor's cgroup
+   (`memory.max` / `--memory` / `MemoryMax=`). An in-service hard bound remains
+   an explicit flagged addition if wanted.
 
 **Resolved by implementation (2026-08-22):**
 - **#5 (old) REST vs CLI emphasis** → both ship, as the design leaned: the CLI

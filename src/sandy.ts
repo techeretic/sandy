@@ -1,3 +1,4 @@
+import { cpus } from "node:os";
 import {
   loadSandyConfig,
   SecretResolver,
@@ -24,7 +25,7 @@ import { FileManager } from "./files/file-manager.js";
 import type { MutationJournal } from "./files/journal.js";
 import { createOrchestrator } from "./orchestrator/factory.js";
 import type { Orchestrator } from "./orchestrator/orchestrator.js";
-import { createLlmEngine, type EngineStatus, type LlmEngine } from "./engine.js";
+import { createLlmEngine, threadsForCpuPercent, type EngineStatus, type LlmEngine } from "./engine.js";
 import { AutonomousLoop, type LoopResult } from "./standalone/loop.js";
 import type {
   OrchestratorRequest,
@@ -63,7 +64,7 @@ export interface SandyDeps {
   /** Injectable fetch for a constructed remote/local engine (tests). */
   engineFetch?: import("@modelcontextprotocol/sdk/shared/transport.js").FetchLike;
   /** Injectable spawn for a constructed local engine (tests). */
-  engineSpawn?: (argv: string[], opts: { stdio: ["ignore", "pipe", "inherit"] }) => import("node:child_process").ChildProcess;
+  engineSpawn?: (argv: string[], opts: { stdio: ["ignore", "pipe", "pipe"] }) => import("node:child_process").ChildProcess;
   /** MCP retry policy overrides. */
   retry?: Partial<RetryPolicy>;
   /** Per-request MCP timeout (ms). */
@@ -207,11 +208,22 @@ export async function createSandy(deps: SandyDeps): Promise<Sandy> {
   const llm = loaded.config.llm;
   const bearerToken =
     llm.provider === "remote" && llm.api_key ? resolver.resolve(llm.api_key) : undefined;
+  // §4.5: the declared sandbox CPU cap is a real lever on the bundled model —
+  // map max_cpu_percent to a `--threads` budget. Only the LOCAL (bundled) engine
+  // consumes it. A cap of 100% means "no effective limit", so no flag is passed
+  // (llama.cpp keeps its own smart default) — the cap only ever REDUCES the
+  // budget, never forces one that isn't a cap (tighten-never-loosen).
+  const cpuPercent = loaded.config.sandbox.max_cpu_percent;
+  const modelMaxThreads =
+    llm.provider === "local" && cpuPercent < 100
+      ? threadsForCpuPercent(cpuPercent, cpus().length)
+      : undefined;
   const engine =
     deps.engine ??
     createLlmEngine(llm, audit, {
       guard,
       bearerToken,
+      maxThreads: modelMaxThreads,
       fetchImpl: deps.engineFetch,
       spawnFactory: deps.engineSpawn,
     });

@@ -16,6 +16,7 @@
     "dist",
     "bin",
     "plugin",
+    "scripts",
     "README.md"
   ],
   "exports": {
