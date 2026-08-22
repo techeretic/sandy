@@ -170,6 +170,10 @@ describe("egress conformance (in-process): the NetworkGuard is the only egress p
       sandyPath: cfg,
       auditFile: path.join(dir, "audit", "egress.jsonl"),
       transportFactory: (server) => createTransport(server, new SecretResolver({}), new NetworkGuard([ep.hostport]), fn),
+      // Pin the *detected* sandbox runtime so this full-run egress test is
+      // host-independent (a bare host reports "none" and a custom-declared
+      // boundary would be reported degraded, flipping report.ok).
+      detection: () => ({ runtime: "docker" as const, evidence: ["test"] }),
     });
     try {
       const report = sandy.check();

@@ -70,7 +70,14 @@ async function makeSession(
 ): Promise<{ api: SandyPluginAPI; session: PluginSession; close: () => Promise<void> }> {
   const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }]);
   inMem.push(crm);
-  const cache = new SessionCache({ transportFactory: () => crm.transport, ...extra });
+  // Pin the *detected* sandbox runtime so status/ok are host-independent (a
+  // bare host reports "none" and a custom-declared boundary would be reported
+  // degraded). A concrete detected runtime ("docker") keeps the report healthy.
+  const cache = new SessionCache({
+    transportFactory: () => crm.transport,
+    detection: () => ({ runtime: "docker" as const, evidence: ["test"] }),
+    ...extra,
+  });
   const session = await cache.get(cfgPath);
   const api = new SandyPluginAPI(session);
   return {

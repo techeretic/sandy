@@ -21,6 +21,14 @@ import {
 
 const fixtureServer = fileURLToPath(new URL("./fixtures/stdio-mcp-server.mjs", import.meta.url));
 
+// Pinned *detected* runtime for the direct createSandy composition tests.
+// Without a detection override the real detectRuntime() is used, which reports
+// "none" on a bare host (e.g. the CI runner) — a custom-declared boundary is
+// then reported degraded and ok flips false. Pin a concrete detected runtime
+// ("docker"; the declared runtime stays "custom") so these tests are
+// host-independent.
+const pinnedDetection = () => ({ runtime: "docker" as const, evidence: ["test"] });
+
 let root: string;
 const tmpDirs: string[] = [];
 const inMemServers: TestServer[] = [];
@@ -110,6 +118,7 @@ describe("createSandy: composition (CLI/service spine)", () => {
     const sandy = await createSandy({
       sandyPath: cfg,
       transportFactory: () => crm.transport,
+      detection: pinnedDetection,
     });
     try {
       const report = sandy.check();
@@ -133,6 +142,7 @@ describe("createSandy: composition (CLI/service spine)", () => {
     const sandy = await createSandy({
       sandyPath: cfg,
       transportFactory: () => crm.transport,
+      detection: pinnedDetection,
     });
     try {
       // Plugin mode (llm.provider "host") → the host engine.
@@ -166,6 +176,7 @@ describe("createSandy: composition (CLI/service spine)", () => {
       sandyPath: cfg,
       auditFile,
       transportFactory: () => crm.transport,
+      detection: pinnedDetection,
     });
     try {
       const result = await sandy.run({
@@ -218,6 +229,7 @@ describe("createSandy: composition (CLI/service spine)", () => {
         },
         close: async () => {},
       }),
+      detection: pinnedDetection,
     });
     try {
       const report = sandy.check();
@@ -278,6 +290,13 @@ describe("createLlmEngine: reasoning-layer seam (PRD §7, AU-01, SD-02/04)", () 
 });
 
 describe("runCli: verbs + exit codes (real stdio MCP server)", () => {
+  // The CLI builds createSandy internally and cannot inject a detection dep,
+  // so pin the real-detection path via the test override to a concrete runtime
+  // ("docker"; the declared runtime stays "custom"). This keeps the CLI tests
+  // deterministic on any host (CI runs on a bare VM where detectRuntime()
+  // reports "none", which a custom-declared boundary would flag as degraded).
+  process.env["SANDY_TEST_RUNTIME"] = "docker";
+
   const stdioCommand = [process.execPath, fixtureServer];
 
   async function fixtures(): Promise<{ cfg: string; ws: string; req: string }> {
