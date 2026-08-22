@@ -135,6 +135,8 @@ The rest of the standalone service, all committed and proven. See `docs/DIARY.md
 - Write-back implementation (Q6 — the gate contract already exists; implementing it needs the admin write allowlist + an approval UI/flow)
 - Dry-run/undo are done; multi-root is done
 
+_(Concrete "where to start" for each deferred item is in the "Pick one" section below, near the bottom. The deferred list above is the canonical scope list; the bottom section is the actionable resume pointer.)_
+
 ## Conventions to keep
 - **Fail closed** everywhere; never smooth over a gap; policy > preferences (tighten-never-loosen).
 - Secrets only as `${ENV_REF}`; resolve at point of use, never store/log; args logged by hash only (AU-02).
@@ -144,7 +146,28 @@ The rest of the standalone service, all committed and proven. See `docs/DIARY.md
 - Update `docs/DIARY.md` per work block; keep `README.md` Status section current.
 
 ## Suggested first action for the next session
-**Phase 1, Phase 2, and the real-model end-to-end are all complete** (design §8 steps 1–6 done, the design §7 decisions settled with code, 169/169 tests, typecheck + build green, the no-egress / cross-sandbox conformance proven for both plugin and standalone modes, **and a real bundled model proven inside a no-egress sandbox**). Read `docs/PHASE2_DESIGN.md` (now fully implemented + §7 settled), `docs/MODEL.md` (provisioning + the default model), and `docs/DIARY.md` 2026-08-22 (afternoon) for the full write-up. Suggested next directions (no code is blocking):
-- **The still-deferred product items** (per DECISIONS.md / PRD §10): write-back (Q6 — gate contract exists; needs the admin write allowlist + an approval flow), extra report formats (HTML/DOCX/XLSX/PDF), and recurring report templates (RG-08).
-- **Optional hardening of the real-model path:** add a `SANDY_REAL_MODEL` opt-in leg to the sandbox matrix that runs `sandy ask` against a real GGUF when one is provisioned (the stub-model leg already runs in CI); or add the in-service hard memory bound (cgroup) if the team wants the ceiling in-process rather than at the supervisor.
-- **Multi-turn / agentic planning** beyond the single gather→report pass (a design §10 non-goal for v2; the loop's validate-then-run seam is what it would extend).
+**Phase 1, Phase 2, and the real-model end-to-end are all complete** (design §8 steps 1–6 done, the design §7 decisions settled with code, 169/169 tests, typecheck + build green, the no-egress / cross-sandbox conformance proven for both plugin and standalone modes, **and a real bundled model proven inside a no-egress sandbox**). Read `docs/PHASE2_DESIGN.md` (now fully implemented + §7 settled), `docs/MODEL.md` (provisioning + the default model), and `docs/DIARY.md` 2026-08-22 (afternoon) for the full write-up. **Nothing is blocking.** Pick one of the items below — each has a concrete "where to start."
+
+### Pick one (deferred product items, per DECISIONS.md / PRD §10)
+
+Each of these is a self-contained slice; do the smallest that adds value.
+
+1. **Extra report formats (HTML/DOCX/XLSX/PDF) — easiest first win.**
+   - Today the report is Markdown-only: `renderMarkdownReport` in `src/orchestrator/report.ts:19`. The config already declares `preferences.default_report_format` (`markdown|html|docx|xlsx|pdf`) in `src/config/schema.ts`, so the knob exists but is unimplemented.
+   - **Where to start:** add a `renderReport(format, input)` dispatcher next to `renderMarkdownReport`; keep the Markdown renderer as the source of truth (HTML can be a lightweight transform; DOCX/XLSX/PDF are higher effort — HTML first). The claims/gaps/provenance table is already structured (`OrchestratorResult`), so a format is a view over it, not new logic. Wire the chosen `format` through the orchestrator's report write (`src/orchestrator/factory.ts`) and the File Manager write (`.md` extension already assumed — generalize the extension per format). Add a test per format asserting the same claims/provenance survive the transform.
+   - **Keep:** fail-closed (an unimplemented format is a config error, not a silent Markdown fallback); provenance/claims identical across formats (SD-06 — the *content* must not change, only the presentation).
+
+2. **Recurring report templates (RG-08).**
+   - PRD §10 / line 109: "a saved request that can be re-run on a schedule or on demand against fresh data."
+   - **Where to start:** a template is exactly an `orchestratorRequestSchema` object (the same shape `sandy run <request.json>` and `POST /run` take). So v1 = a small registry of named saved requests + a verb/API to run one: `sandy run <template-name>` and `POST /run {template}`. The loop/API/orchestrator are unchanged — a template just resolves to a request. "On a schedule" is the supervisor's job (the service is designed to be launched by systemd/launchd, design §6); v1 does **on-demand re-run**, not a cron.
+   - **Keep:** a template is validated by the *same* `orchestratorRequestSchema` + legal tool catalog as an ad-hoc request (nothing new is legal because it's "saved").
+
+3. **Write-back (Q6 — the biggest, most design-heavy).**
+   - The **gate contract already exists**: `WriteApprovalGate` / `ReadOnlyGate` in `src/orchestrator/write-gate.ts` (decides allow/refuse from policy + an approval, pure + auditable). `src/files/journal.ts` marks the hook point ("an operation only reaches [the filesystem] [after the gate]").
+   - **Where to start:** this needs two things that don't exist yet — (a) an **admin write allowlist** (separate from, and stricter than, the read allowlist; CP-02 policy > preferences) in the config schema, and (b) an **approval flow/UI** (the approval is an auditable event; the plugin's `needsConfirmation` pattern in `src/plugin/api.ts` is the in-band precedent). A non-`ReadOnlyGate` implementation of `WriteApprovalGate` + the allowlist config is the core; the approval UX is the surface. This is the one item that materially widens the security surface, so go slow and keep fail-closed (default `ReadOnlyGate` = refuse all writes).
+   - **Keep:** never auto-confirm (FM-04 precedent); a write is a distinct audited event; the read allowlist is untouched.
+
+### Optional hardening (nice-to-have, not product scope)
+- **`SANDY_REAL_MODEL` conformance leg:** add an opt-in leg to `conformance/sandbox-matrix.sh` that runs `sandy ask` against a real GGUF when one is provisioned (the stub-model leg already runs in CI; the real model was proven manually — see DIARY 2026-08-22 afternoon). Guard it so CI stays green with no model (skip unless `SANDY_REAL_MODEL` is set + the file exists).
+- **In-service hard memory bound:** the hard ceiling is currently the service manager's cgroup (`memory.max`/`--memory`/`MemoryMax=`). If the team wants the ceiling in-process, wrap the model's process group in a cgroup — a small, flagged addition (§4.5).
+- **Multi-turn / agentic planning:** extend the single gather→report pass in `src/standalone/loop.ts:178` (`run(goal)`) to plan a second round from the first results. A design §10 non-goal for v2; the validate-then-run seam is what it extends.
