@@ -313,6 +313,45 @@ describe("FileManager: undo journal (FM-05)", () => {
     expect(await existsAny(path.join(workspace, "ren-moved.txt"))).toBe(false);
   });
 
+  it("undo restores a pre-existing binary file byte-for-byte, not corrupted through UTF-8", async () => {
+    const fm = manager();
+    // Not valid UTF-8 (0xff is never a valid UTF-8 byte), so a UTF-8
+    // round-trip would corrupt it. Written directly to disk: it is
+    // pre-existing content, not something Sandy wrote.
+    const binary = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0x00, 0x01]);
+    const p = path.join(workspace, "bin-undo.png");
+    await writeFile(p, binary);
+    await fm.deleteFile("bin-undo.png", { confirmed: true });
+    expect(await existsAny(p)).toBe(false);
+    await fm.undo();
+    const restored = await readFile(p);
+    expect(restored.equals(binary)).toBe(true);
+  });
+
+  it("undo of an overwrite restores a pre-existing binary file byte-for-byte", async () => {
+    const fm = manager();
+    const binary = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x00, 0x01, 0x80]);
+    const p = path.join(workspace, "bin-overwrite.png");
+    await writeFile(p, binary);
+    await fm.write("bin-overwrite.png", "now text", { confirmed: true });
+    await fm.undo();
+    const restored = await readFile(p);
+    expect(restored.equals(binary)).toBe(true);
+  });
+
+  it("undo of deleteDirectory restores binary files in the subtree byte-for-byte", async () => {
+    const fm = manager();
+    const binary = Buffer.from([0x25, 0x50, 0x44, 0x46, 0xff, 0xfe, 0x00, 0x10]); // %PDF + invalid UTF-8
+    const p = path.join(workspace, "bin-tree/doc.pdf");
+    await mkdir(path.join(workspace, "bin-tree"), { recursive: true });
+    await writeFile(p, binary);
+    await fm.write("bin-tree/notes.txt", "text");
+    await fm.deleteDirectory("bin-tree", { confirmed: true });
+    await fm.undo();
+    expect((await readFile(p)).equals(binary)).toBe(true);
+    expect(await readFile(path.join(workspace, "bin-tree/notes.txt"), "utf8")).toBe("text");
+  });
+
   it("undo re-checks confinement, refusing to follow a symlink swapped in after the original mutation", async () => {
     const fm = manager();
     await fm.write("link-target.txt", "original content");

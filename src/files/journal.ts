@@ -28,8 +28,10 @@ export interface MutationRecord {
   to?: string;
   /**
    * Snapshot needed to reverse the operation.
-   *  - file: prior content (null if the file did not exist)
+   *  - file: prior content as base64 of the raw bytes (null if the file did
+   *    not exist) — byte-exact so binary files survive an undo round-trip
    *  - directory: whether it existed and, for delete, a full subtree snapshot
+   *    (file contents base64, same as above)
    */
   before: unknown;
   /** What the operation produced. */

@@ -191,7 +191,9 @@ export class FileManager {
     try {
       await stat(abs);
       existed = true;
-      priorContent = await readFile(abs, "utf8");
+      // Capture the prior bytes exactly (base64 of the raw buffer); a UTF-8
+      // round-trip would silently corrupt a pre-existing binary file on undo.
+      priorContent = (await readFile(abs)).toString("base64");
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
@@ -234,7 +236,7 @@ export class FileManager {
       if (s.isDirectory()) {
         throw new FileOpError("io", candidate, `${abs} is a directory; use deleteDirectory`);
       }
-      priorContent = await readFile(abs, "utf8");
+      priorContent = (await readFile(abs)).toString("base64");
     } catch (err) {
       if (err instanceof FileOpError) throw err;
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
@@ -446,12 +448,12 @@ export class FileManager {
         break;
       case "write-file":
         if (record.before === null) await this.rmSafe(target);
-        else await writeFile(target, record.before as string, "utf8");
+        else await writeFile(target, Buffer.from(record.before as string, "base64"));
         break;
       case "delete-file":
         if (record.before !== null) {
           await mkdir(path.dirname(target), { recursive: true });
-          await writeFile(target, record.before as string, "utf8");
+          await writeFile(target, Buffer.from(record.before as string, "base64"));
         }
         break;
       case "create-directory":
@@ -498,7 +500,9 @@ async function snapshotDirectory(root: string): Promise<SubtreeSnapshot> {
         snapshot.dirs.push(rel);
         await walk(full);
       } else if (entry.isFile()) {
-        snapshot.files.push({ rel, content: await readFile(full, "utf8") });
+        // Byte-exact capture (base64 of raw bytes) so undo restores pre-existing
+        // binary files in the subtree without a lossy UTF-8 round-trip.
+        snapshot.files.push({ rel, content: (await readFile(full)).toString("base64") });
       }
     }
   }
@@ -514,7 +518,7 @@ async function restoreDirectory(root: string, snapshot: SubtreeSnapshot): Promis
   for (const file of snapshot.files) {
     const full = path.join(root, file.rel);
     await mkdir(path.dirname(full), { recursive: true });
-    await writeFile(full, file.content, "utf8");
+    await writeFile(full, Buffer.from(file.content, "base64"));
   }
 }
 
