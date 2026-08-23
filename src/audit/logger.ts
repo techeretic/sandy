@@ -102,6 +102,7 @@ export class JsonlAuditLogger implements AuditLogger {
   private readonly filePath: string;
   private writeChain: Promise<void> = Promise.resolve();
   private closed = false;
+  private writeError: Error | undefined;
 
   constructor(filePath: string, options: { auditPayloadLogging?: boolean } = {}) {
     this.filePath = filePath;
@@ -116,10 +117,23 @@ export class JsonlAuditLogger implements AuditLogger {
     const event = this.memory.append(type, data, opts);
     if (!this.closed) {
       const line = `${JSON.stringify(event)}\n`;
-      this.writeChain = this.writeChain.then(async () => {
-        await mkdir(path.dirname(this.filePath), { recursive: true });
-        await appendFile(this.filePath, line, "utf8");
-      });
+      this.writeChain = this.writeChain
+        .then(async () => {
+          await mkdir(path.dirname(this.filePath), { recursive: true });
+          await appendFile(this.filePath, line, "utf8");
+        })
+        .catch((err) => {
+          // The audit log is supposed to be a complete, reliable record — a
+          // write failure must never vanish silently (it used to become an
+          // unhandled promise rejection with no operator-visible signal).
+          // Surface it loudly now (stderr) and remember the first failure so
+          // close() reports it to the caller, instead of swallowing it.
+          const wrapped = err instanceof Error ? err : new Error(String(err));
+          this.writeError ??= wrapped;
+          process.stderr.write(
+            `sandy: audit log write to ${this.filePath} failed: ${wrapped.message}\n`,
+          );
+        });
     }
     return event;
   }
@@ -131,6 +145,7 @@ export class JsonlAuditLogger implements AuditLogger {
   async close(): Promise<void> {
     this.closed = true;
     await this.writeChain;
+    if (this.writeError) throw this.writeError;
   }
 }
 
