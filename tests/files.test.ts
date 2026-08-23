@@ -36,6 +36,23 @@ function manager(over: Partial<PolicyConfig> = {}, journalDepth?: number): FileM
   });
 }
 
+class RecordingAuditSink {
+  records: Array<{ op: string; path: string; outcome: "ok" | "error"; error?: string; dryRun?: boolean }> = [];
+  record(entry: { op: string; path: string; at: string; outcome: "ok" | "error"; error?: string; dryRun?: boolean }): void {
+    this.records.push(entry);
+  }
+}
+
+function managerWithAudit(over: Partial<PolicyConfig> = {}): { fm: FileManager; audit: RecordingAuditSink } {
+  const audit = new RecordingAuditSink();
+  const fm = new FileManager({
+    confinement: new PathConfinement([workspace]),
+    policy: policy(over),
+    audit,
+  });
+  return { fm, audit };
+}
+
 beforeAll(async () => {
   workspace = await mkdtemp(path.join(tmpdir(), "sandy-fm-"));
   outside = await mkdtemp(path.join(tmpdir(), "sandy-fm-out-"));
@@ -311,6 +328,34 @@ describe("FileManager: undo journal (FM-05)", () => {
     await fm.undo();
     expect(await existsAny(path.join(workspace, "ren.txt"))).toBe(true);
     expect(await existsAny(path.join(workspace, "ren-moved.txt"))).toBe(false);
+  });
+
+  it("undo() produces an audit record (AU-01)", async () => {
+    const { fm, audit } = managerWithAudit();
+    await fm.write("a.txt", "hello");
+    const before = audit.records.length;
+    const undone = await fm.undo();
+    expect(undone?.op).toBe("create-file");
+    expect(audit.records.length).toBe(before + 1);
+    const entry = audit.records.at(-1);
+    expect(entry).toBeDefined();
+    expect(entry?.op).toBe("undo(create-file)");
+    expect(entry?.outcome).toBe("ok");
+    expect(entry?.path).toBe(path.join(workspace, "a.txt"));
+  });
+
+  it("a failed undo records an audit error entry", async () => {
+    const { fm, audit } = managerWithAudit();
+    await fm.write("audit-sym.txt", "original");
+    // Swap the file for a symlink outside the root so the reversal fails.
+    await rm(path.join(workspace, "audit-sym.txt"));
+    await symlink(outside, path.join(workspace, "audit-sym.txt"));
+    await expect(fm.undo()).rejects.toThrow();
+    const entry = audit.records.at(-1);
+    expect(entry).toBeDefined();
+    expect(entry?.op).toBe("undo(create-file)");
+    expect(entry?.outcome).toBe("error");
+    expect(entry?.error).toBeTruthy();
   });
 
   it("undo re-checks confinement, refusing to follow a symlink swapped in after the original mutation", async () => {
