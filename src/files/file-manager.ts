@@ -319,7 +319,22 @@ export class FileManager {
       throw err;
     });
 
+    // Node's fs.rename silently overwrites an existing destination. Gate that
+    // on the (forced-minimum) "overwrite" confirmation kind, in addition to the
+    // "rename" gate, so a rename cannot defeat the policy that write() enforces
+    // for the equivalent clobber (GHSA-rm4r-g5vv-mvrm).
+    let destExists = false;
+    try {
+      await stat(absTo);
+      destExists = true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+
     this.requireConfirmation("rename", from, `rename ${absFrom} -> ${absTo}`, options);
+    if (destExists) {
+      this.requireConfirmation("overwrite", to, `rename would overwrite existing destination ${absTo}`, options);
+    }
 
     const dryRun = options.dryRun ?? this.policy.dry_run_default;
     if (!dryRun) {
