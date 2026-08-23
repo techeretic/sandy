@@ -400,11 +400,11 @@ export class FileManager {
 
     this.requireConfirmation("delete", candidate, `delete directory ${abs} and all of its contents`, options);
 
-    const snapshot = dryRunOf(options)
-      ? null
-      : await snapshotDirectory(abs);
-
+    // One dry-run decision for both the snapshot and the delete: a dry run
+    // (explicit or via policy.dry_run_default) must never read the subtree,
+    // so an unreadable file cannot turn a no-op dry run into a hard failure.
     const dryRun = options.dryRun ?? this.policy.dry_run_default;
+    const snapshot = dryRun ? null : await snapshotDirectory(abs);
     if (!dryRun) {
       await this.io(candidate, () => rm(abs, { recursive: true }), { notFound: `cannot delete: ${abs}` });
     }
@@ -504,10 +504,6 @@ export class FileManager {
   private async rmSafe(p: string): Promise<void> {
     await rm(p, { force: true });
   }
-}
-
-function dryRunOf(options: FileOpOptions): boolean {
-  return options.dryRun ?? false;
 }
 
 export interface SubtreeSnapshot {
