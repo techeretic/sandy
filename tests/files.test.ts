@@ -105,6 +105,34 @@ describe("FileManager: confirmations (FM-04)", () => {
     expect(await existsAny(path.join(workspace, "del.txt"))).toBe(true);
   });
 
+  it("rename() requires overwrite confirmation when the destination already exists", async () => {
+    // rename() used to gate only on the 'rename' kind and never checked whether
+    // the destination existed, so it silently clobbered an existing file under
+    // the default policy that mandatorily requires 'overwrite' confirmation for
+    // the equivalent write() (GHSA-rm4r-g5vv-mvrm).
+    const fm = manager();
+    await fm.write("src.txt", "new content", { confirmed: true });
+    await fm.write("dst.txt", "existing content", { confirmed: true });
+    // No confirmation: the 'rename' kind is not in the default policy, but the
+    // new 'overwrite' gate (forced-minimum) must still reject the clobber.
+    await expect(fm.rename("src.txt", "dst.txt")).rejects.toThrow(ConfirmationRequiredError);
+    // The destination is untouched by the refused rename.
+    expect((await fm.read("dst.txt")).content).toBe("existing content");
+    expect(await existsAny(path.join(workspace, "src.txt"))).toBe(true);
+  });
+
+  it("rename() over an existing destination succeeds once overwrite is confirmed", async () => {
+    const fm = manager();
+    await fm.write("src.txt", "new content", { confirmed: true });
+    await fm.write("dst.txt", "existing content", { confirmed: true });
+    // 'overwrite' is a forced-minimum policy kind, so a single {confirmed:true}
+    // satisfies both the 'rename' and the 'overwrite' gates.
+    const result = await fm.rename("src.txt", "dst.txt", { confirmed: true });
+    expect(result.applied).toBe(true);
+    expect((await fm.read("dst.txt")).content).toBe("new content");
+    expect(await existsAny(path.join(workspace, "src.txt"))).toBe(false);
+  });
+
   it("can make policy stricter: require confirmation for create", async () => {
     const fm = manager({ confirmation_required: ["delete", "overwrite", "create"] });
     const err = await fm.write("strict.txt", "x").catch((e) => e);
