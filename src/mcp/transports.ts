@@ -47,10 +47,16 @@ function authHeaders(server: McpServer, resolver: SecretResolver): Record<string
     if (token === undefined) return undefined;
     return { Authorization: `Bearer ${token}` };
   }
-  // oauth/mtls require the transport's own authProvider machinery; wiring a
-  // full OAuthClientProvider is a Phase 1 follow-up. Bearer/API-key cover the
-  // launch servers.
-  return undefined;
+  // oauth/mtls require the transport's own authProvider/mTLS-cert machinery,
+  // which is not wired up yet (a Phase 1 follow-up). Fail closed rather than
+  // silently connecting unauthenticated to a server the config says needs
+  // oauth/mtls — a config that validates must not produce a weaker runtime
+  // guarantee than it declares (MCP-10; GHSA-38wj-6mjh-2jf9).
+  throw new Error(
+    `MCP server "${server.name}": auth.type "${auth.type}" is not yet implemented ` +
+      `(oauth/mtls require the transport's own authProvider/certificate machinery). ` +
+      `Refusing to connect unauthenticated. Use "bearer" or "api_key" auth today, or omit auth.`,
+  );
 }
 
 /**
