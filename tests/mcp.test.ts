@@ -10,8 +10,10 @@ import {
   guardedFetch,
   withRetry,
   resolveRetryPolicy,
+  createTransport,
   type McpAuditSink,
   type McpCallRecord,
+  type McpServer,
 } from "../src/index.js";
 import {
   makeInMemoryServer,
@@ -350,5 +352,46 @@ describe("withRetry backoff math", () => {
     ).rejects.toThrow("fatal");
     expect(calls).toBe(1);
     expect(delays).toEqual([]);
+  });
+});
+
+describe("createTransport auth fail-closed (GHSA-38wj-6mjh-2jf9)", () => {
+  it("throws for oauth auth (not yet implemented, fail closed)", () => {
+    const server: McpServer = {
+      name: "oauth-server",
+      transport: "http",
+      url: "https://internal.example.com/mcp",
+      auth: {
+        type: "oauth",
+        client_id: "sandy-client",
+        token_url: "https://internal.example.com/oauth/token",
+      },
+      version: "1.0.0",
+      capabilities: ["read"],
+      allowed_tools: ["read"],
+    };
+    const resolver = new SecretResolver({});
+    const guard = new NetworkGuard(["internal.example.com"]);
+    expect(() => createTransport(server, resolver, guard)).toThrow(/auth\.type "oauth" is not yet implemented/);
+  });
+
+  it("throws for mtls auth (not yet implemented, fail closed)", () => {
+    const server: McpServer = {
+      name: "mtls-server",
+      transport: "http",
+      url: "https://internal.example.com/mcp",
+      auth: {
+        type: "mtls",
+        ca_bundle_path: "/etc/sandy/ca.pem",
+        client_cert_path: "/etc/sandy/client.pem",
+        client_key_path: "/etc/sandy/client.key",
+      },
+      version: "1.0.0",
+      capabilities: ["read"],
+      allowed_tools: ["read"],
+    };
+    const resolver = new SecretResolver({});
+    const guard = new NetworkGuard(["internal.example.com"]);
+    expect(() => createTransport(server, resolver, guard)).toThrow(/auth\.type "mtls" is not yet implemented/);
   });
 });
