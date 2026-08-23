@@ -185,6 +185,22 @@ describe("FileManager: ignore patterns (FM-07)", () => {
     expect((err as FileOpError).reason).toBe("ignored");
     expect(await existsAny(path.join(workspace, "app.env"))).toBe(false);
   });
+
+  it("list() applies ignore_patterns relative to the confinement root, not the queried directory", async () => {
+    const fm = manager({ ignore_patterns: ["secrets/*.key"] });
+    // Create the files directly on disk: fm.write("secrets/api.key") would be
+    // refused by assertNotIgnored (the path matches the ignore pattern), which
+    // is exactly why the leak was reachable only through list(), not write().
+    await mkdir(path.join(workspace, "secrets"), { recursive: true });
+    await writeFile(path.join(workspace, "secrets/api.key"), "sekrit");
+    await writeFile(path.join(workspace, "secrets/readme.md"), "not secret");
+    // A direct list() of the subdirectory must still exclude the pattern
+    // (GHSA-r885-qm59-2mxf): walk() used to match ignore patterns against the
+    // queried directory itself, so "secrets/*.key" never matched "api.key".
+    const entries = await fm.list("secrets");
+    expect(entries).not.toContain("api.key");
+    expect(entries).toContain("readme.md");
+  });
 });
 
 describe("FileManager: formats (FM-08)", () => {
