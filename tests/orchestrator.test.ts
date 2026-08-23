@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -388,6 +388,39 @@ describe("Audit logging (AU-01/02/03)", () => {
     const parsed = lines.map((l) => JSON.parse(l) as { seq: number; type: string });
     expect(parsed.map((p) => p.seq)).toEqual([1, 2, 3]);
     expect(parsed.map((p) => p.type)).toEqual(["session_start", "mcp_call", "session_end"]);
+  });
+
+  it("close() rejects if a JSONL write ever failed during the session", async () => {
+    // Make the write fail reliably: put a *file* at the parent path, so the
+    // logger's mkdir(path.dirname(filePath)) fails with ENOTDIR. (Permission
+    // tricks behave inconsistently across CI runners and are meaningless as
+    // root.)
+    const blocker = path.join(dir, "blocker");
+    await writeFile(blocker, "not a directory");
+    try {
+      const logger = new JsonlAuditLogger(path.join(blocker, "audit.jsonl"));
+      logger.append("session_start", {});
+      await expect(logger.close()).rejects.toThrow();
+    } finally {
+      await rm(blocker);
+    }
+  });
+
+  it("keeps appending in-memory events after a failed disk write (and reports the first error at close)", async () => {
+    const blocker = path.join(dir, "blocker2");
+    await writeFile(blocker, "not a directory");
+    try {
+      const logger = new JsonlAuditLogger(path.join(blocker, "audit.jsonl"));
+      logger.append("session_start", {});
+      // The write fails asynchronously; append() itself must stay usable and
+      // must not surface an unhandled rejection.
+      const ev2 = logger.append("mcp_call", { server: "crm", tool: "read_deals" });
+      expect(ev2.seq).toBe(2);
+      expect(logger.events()).toHaveLength(2);
+      await expect(logger.close()).rejects.toThrow(/EEXIST|ENOENT|ENOTDIR|not a directory|failed/i);
+    } finally {
+      await rm(blocker);
+    }
   });
 
   it("captures a session transcript (AU-03)", () => {
