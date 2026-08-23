@@ -316,6 +316,46 @@ describe("LocalApi (Phase 2, design §5)", () => {
     expect(payloads[payloads.length - 1]?.type).toBe("done");
   });
 
+  describe("CSRF hardening (GHSA-qx23-r762-x2j9)", () => {
+    it("rejects a POST with a non-application/json Content-Type (closes the CORS-simple-request bypass)", async () => {
+      const { base } = await makeApi();
+      const res = await fetch(`${base}/run`, {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: JSON.stringify(LEGAL_RUN),
+      });
+      expect(res.status).toBe(415);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toMatch(/content-type/i);
+    });
+
+    it("rejects a POST carrying a foreign Origin header", async () => {
+      const { base } = await makeApi();
+      const res = await fetch(`${base}/run`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://evil.example.com" },
+        body: JSON.stringify(LEGAL_RUN),
+      });
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toMatch(/cross-origin/i);
+    });
+
+    it("still accepts a same-origin (Origin-less and explicit same-Origin) POST with application/json", async () => {
+      const { base } = await makeApi();
+      // Origin-less (the common local CLI/tool case) — must pass.
+      const originless = await postRun(base, LEGAL_RUN);
+      expect(originless.status).toBe(202);
+      // Explicit same-origin — must also pass the Origin check.
+      const sameOrigin = await fetch(`${base}/run`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: base },
+        body: JSON.stringify(LEGAL_RUN),
+      });
+      expect(sameOrigin.status).toBe(202);
+    });
+  });
+
   it("close() stops the service: new jobs are refused and the port is released", async () => {
     const { api, base } = await makeApi();
     await api.close();

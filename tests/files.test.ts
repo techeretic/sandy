@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -105,6 +105,34 @@ describe("FileManager: confirmations (FM-04)", () => {
     expect(await existsAny(path.join(workspace, "del.txt"))).toBe(true);
   });
 
+  it("rename() requires overwrite confirmation when the destination already exists", async () => {
+    // rename() used to gate only on the 'rename' kind and never checked whether
+    // the destination existed, so it silently clobbered an existing file under
+    // the default policy that mandatorily requires 'overwrite' confirmation for
+    // the equivalent write() (GHSA-rm4r-g5vv-mvrm).
+    const fm = manager();
+    await fm.write("src.txt", "new content", { confirmed: true });
+    await fm.write("dst.txt", "existing content", { confirmed: true });
+    // No confirmation: the 'rename' kind is not in the default policy, but the
+    // new 'overwrite' gate (forced-minimum) must still reject the clobber.
+    await expect(fm.rename("src.txt", "dst.txt")).rejects.toThrow(ConfirmationRequiredError);
+    // The destination is untouched by the refused rename.
+    expect((await fm.read("dst.txt")).content).toBe("existing content");
+    expect(await existsAny(path.join(workspace, "src.txt"))).toBe(true);
+  });
+
+  it("rename() over an existing destination succeeds once overwrite is confirmed", async () => {
+    const fm = manager();
+    await fm.write("src.txt", "new content", { confirmed: true });
+    await fm.write("dst.txt", "existing content", { confirmed: true });
+    // 'overwrite' is a forced-minimum policy kind, so a single {confirmed:true}
+    // satisfies both the 'rename' and the 'overwrite' gates.
+    const result = await fm.rename("src.txt", "dst.txt", { confirmed: true });
+    expect(result.applied).toBe(true);
+    expect((await fm.read("dst.txt")).content).toBe("new content");
+    expect(await existsAny(path.join(workspace, "src.txt"))).toBe(false);
+  });
+
   it("can make policy stricter: require confirmation for create", async () => {
     const fm = manager({ confirmation_required: ["delete", "overwrite", "create"] });
     const err = await fm.write("strict.txt", "x").catch((e) => e);
@@ -184,6 +212,22 @@ describe("FileManager: ignore patterns (FM-07)", () => {
     expect(err).toBeInstanceOf(FileOpError);
     expect((err as FileOpError).reason).toBe("ignored");
     expect(await existsAny(path.join(workspace, "app.env"))).toBe(false);
+  });
+
+  it("list() applies ignore_patterns relative to the confinement root, not the queried directory", async () => {
+    const fm = manager({ ignore_patterns: ["secrets/*.key"] });
+    // Create the files directly on disk: fm.write("secrets/api.key") would be
+    // refused by assertNotIgnored (the path matches the ignore pattern), which
+    // is exactly why the leak was reachable only through list(), not write().
+    await mkdir(path.join(workspace, "secrets"), { recursive: true });
+    await writeFile(path.join(workspace, "secrets/api.key"), "sekrit");
+    await writeFile(path.join(workspace, "secrets/readme.md"), "not secret");
+    // A direct list() of the subdirectory must still exclude the pattern
+    // (GHSA-r885-qm59-2mxf): walk() used to match ignore patterns against the
+    // queried directory itself, so "secrets/*.key" never matched "api.key".
+    const entries = await fm.list("secrets");
+    expect(entries).not.toContain("api.key");
+    expect(entries).toContain("readme.md");
   });
 });
 
@@ -267,6 +311,21 @@ describe("FileManager: undo journal (FM-05)", () => {
     await fm.undo();
     expect(await existsAny(path.join(workspace, "ren.txt"))).toBe(true);
     expect(await existsAny(path.join(workspace, "ren-moved.txt"))).toBe(false);
+  });
+
+  it("undo re-checks confinement, refusing to follow a symlink swapped in after the original mutation", async () => {
+    const fm = manager();
+    await fm.write("link-target.txt", "original content");
+    // Swap the file for a symlink pointing outside the confined root before undo runs.
+    await rm(path.join(workspace, "link-target.txt"));
+    await symlink(outside, path.join(workspace, "link-target.txt"));
+
+    // reverse() must re-resolve the journaled path through PathConfinement and
+    // refuse the symlink-escape (SandboxViolationError), rather than following
+    // the symlink with a bare fs call (TOCTOU escape, GHSA-w84c-rwhv-mrgx).
+    await expect(fm.undo()).rejects.toThrow(SandboxViolationError);
+    const leaked = await stat(path.join(outside, "should-not-exist")).catch(() => null);
+    expect(leaked).toBeNull();
   });
 });
 

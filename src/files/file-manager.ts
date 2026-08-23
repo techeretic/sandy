@@ -137,13 +137,20 @@ export class FileManager {
     const abs = await this.confinement.resolve(candidate);
     this.assertNotIgnored(abs, candidate);
     const recursive = options.recursive ?? false;
+    // Match ignore patterns against the confinement root (the same root that
+    // read/write/delete use via assertNotIgnored), not the queried directory —
+    // otherwise a pattern like "secrets/*.key" never matches a direct
+    // list("secrets") (GHSA-r885-qm59-2mxf). Returned paths stay relative to
+    // the queried directory (listRoot) — no change to the return contract.
+    const confinementRoot = this.containingRoot(abs) ?? abs;
     const results: string[] = [];
-    await this.walk(abs, abs, recursive, results);
+    await this.walk(confinementRoot, abs, abs, recursive, results);
     return results;
   }
 
   private async walk(
-    root: string,
+    confinementRoot: string,
+    listRoot: string,
     dir: string,
     recursive: boolean,
     out: string[],
@@ -153,11 +160,12 @@ export class FileManager {
     });
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
-      const rel = path.relative(root, full);
-      if (isIgnored(rel, this.ignorePatterns)) continue;
-      out.push(rel);
+      const ignoreRel = path.relative(confinementRoot, full);
+      if (isIgnored(ignoreRel, this.ignorePatterns)) continue;
+      const listRel = path.relative(listRoot, full);
+      out.push(listRel);
       if (recursive && entry.isDirectory()) {
-        await this.walk(root, full, true, out);
+        await this.walk(confinementRoot, listRoot, full, true, out);
       }
     }
   }
@@ -311,7 +319,22 @@ export class FileManager {
       throw err;
     });
 
+    // Node's fs.rename silently overwrites an existing destination. Gate that
+    // on the (forced-minimum) "overwrite" confirmation kind, in addition to the
+    // "rename" gate, so a rename cannot defeat the policy that write() enforces
+    // for the equivalent clobber (GHSA-rm4r-g5vv-mvrm).
+    let destExists = false;
+    try {
+      await stat(absTo);
+      destExists = true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+
     this.requireConfirmation("rename", from, `rename ${absFrom} -> ${absTo}`, options);
+    if (destExists) {
+      this.requireConfirmation("overwrite", to, `rename would overwrite existing destination ${absTo}`, options);
+    }
 
     const dryRun = options.dryRun ?? this.policy.dry_run_default;
     if (!dryRun) {
@@ -411,32 +434,41 @@ export class FileManager {
   }
 
   private async reverse(record: MutationRecord): Promise<void> {
+    // Re-resolve every path through PathConfinement before touching it, so undo
+    // gets the same real-path/symlink-escape check every live mutation gets.
+    // A path swapped for a symlink between the original mutation and a later
+    // undo() in the same session is refused (SandboxViolationError), not
+    // followed (GHSA-w84c-rwhv-mrgx).
+    const target = await this.confinement.resolve(record.path);
     switch (record.op) {
       case "create-file":
-        await this.rmSafe(record.path);
+        await this.rmSafe(target);
         break;
       case "write-file":
-        if (record.before === null) await this.rmSafe(record.path);
-        else await writeFile(record.path, record.before as string, "utf8");
+        if (record.before === null) await this.rmSafe(target);
+        else await writeFile(target, record.before as string, "utf8");
         break;
       case "delete-file":
         if (record.before !== null) {
-          await mkdir(path.dirname(record.path), { recursive: true });
-          await writeFile(record.path, record.before as string, "utf8");
+          await mkdir(path.dirname(target), { recursive: true });
+          await writeFile(target, record.before as string, "utf8");
         }
         break;
       case "create-directory":
-        await rm(record.path, { recursive: true });
+        await rm(target, { recursive: true });
         break;
       case "delete-directory": {
         const snapshot = record.before as SubtreeSnapshot | null;
         if (snapshot) {
-          await restoreDirectory(record.path, snapshot);
+          await restoreDirectory(target, snapshot);
         }
         break;
       }
       case "rename":
-        if (record.to) await rename(record.to, record.path);
+        if (record.to) {
+          const to = await this.confinement.resolve(record.to);
+          await rename(to, target);
+        }
         break;
     }
   }
