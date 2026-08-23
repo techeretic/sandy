@@ -301,3 +301,12 @@ Closed the second High finding from the 2026-08-22 full-repo review (§H2, fix p
 - **Tests (+2, 171/171):** `tests/mcp.test.ts` — `createTransport` throws for an `oauth`-auth server and for an `mtls`-auth server (TDD: red → green).
 - **Verified:** typecheck + build green; **171/171 tests** (was 169, +2); no existing test constructed an oauth/mtls server expecting a successful connect (confirmed in the full run).
 - **Process note:** first advisory fixed via the **branch + PR** workflow (one branch + PR per advisory), after direct-to-master for GHSA-h5c5-76pv-6g85.
+
+### Security — GHSA-qx23-r762-x2j9: CSRF hardening on the loopback-only local API, 2026-08-23
+
+Closed finding M11 from the 2026-08-22 full-repo review (fix plan `reviews/2026-08-22-fix-plan-medium-low-priority.md` Task M11), tracked as private advisory **GHSA-qx23-r762-x2j9** (CWE-352). The loopback-only REST API (`src/standalone/api.ts`) is intentionally unauthenticated (loopback-only + single-user), but `readJsonBody()` ignored `Content-Type` and `handleRequest()` never checked `Origin`/`Referer`. A cross-site request with `Content-Type: text/plain` is a CORS-"simple" request (no preflight), and the server happily `JSON.parse`d and executed the body — so any webpage open in the user's browser could `POST /run` against a running `sandy serve` and enqueue a real job (an arbitrary allowed MCP gather + report write) with no confirmation.
+
+- **Content-Type gate:** `readJsonBody()` now throws `415` for any non-`application/json` content type. A JSON content type forces a browser preflight, which this server never grants (no `Access-Control-Allow-Origin`), so a genuine cross-origin browser request can no longer reach the body at all.
+- **Independent Origin check:** `handleRequest()` now rejects (403) any request whose `Origin` header is not this server's own bound address, before any route matching. A legitimate local caller (curl, the CLI, a Node script) never sends `Origin`; only a browser does. This is defense in depth, independent of CORS/preflight quirks.
+- **Tests (+3, 172/172):** `tests/standalone-api.test.ts` — POST with `text/plain` → 415; POST with a foreign `Origin` → 403; POST with `application/json` (both Origin-less and explicit same-origin) → 202. TDD: red → green.
+- **Verified:** typecheck + build green; **172/172 tests** (was 169, +3); no existing test sent a non-JSON content type or a foreign Origin expecting success.
