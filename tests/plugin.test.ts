@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile, readFile as fsRead } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
@@ -9,9 +9,23 @@ import {
   ToolInputError,
   SessionCache,
   createSandyMcpServer,
+  createSandy,
   type PluginSession,
   type SandyPluginOptions,
 } from "../src/index.js";
+
+// Wrap createSandy in a spy (delegating to the real one) so the race test can
+// count how many times Sandy is actually constructed.
+vi.mock("../src/sandy.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/sandy.js")>("../src/sandy.js");
+  return {
+    ...actual,
+    createSandy: vi.fn((opts: Parameters<typeof actual.createSandy>[0]) =>
+      actual.createSandy(opts),
+    ),
+  };
+});
+const createSandyMock = vi.mocked(createSandy);
 import { makeInMemoryServer, type TestServer } from "./helpers/mcp.js";
 
 let root: string;
@@ -288,6 +302,29 @@ describe("SandyPluginAPI: files (FM, confined)", () => {
       expect(result.content).toBeUndefined();
     } finally {
       await close();
+    }
+  });
+});
+
+describe("SessionCache: construction (PL-01)", () => {
+  it("get() called concurrently for the same config path returns the same session and builds Sandy only once", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, [ws]);
+    const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }]);
+    inMem.push(crm);
+    createSandyMock.mockClear();
+    try {
+      const cache = new SessionCache({
+        transportFactory: () => crm.transport,
+        detection: () => ({ runtime: "docker" as const, evidence: ["test"] }),
+      });
+      const [a, b] = await Promise.all([cache.get(cfg), cache.get(cfg)]);
+      expect(a).toBe(b);
+      expect(cache.size).toBe(1);
+      expect(createSandyMock).toHaveBeenCalledTimes(1);
+      await cache.closeAll();
+    } finally {
+      await crm.close();
     }
   });
 });
