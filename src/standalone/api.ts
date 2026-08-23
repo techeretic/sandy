@@ -174,6 +174,8 @@ export class LocalApi {
   private current: Job | null = null;
   private stopped = false;
   private workerDone: Promise<void> | null = null;
+  /** Resolvers for workers parked in {@link waitForWork}; woken on enqueue/close. */
+  private wakeResolvers: Array<() => void> = [];
 
   constructor(sandy: Sandy, options: LocalApiOptions = {}) {
     this.sandy = sandy;
@@ -245,7 +247,11 @@ export class LocalApi {
       throw new ApiError(429, "too many pending jobs; try again shortly");
     }
     const input = this.validate(kind, body);
-    return this.store.create(kind, input);
+    const job = this.store.create(kind, input);
+    // A job just appeared: wake a parked worker immediately instead of waiting
+    // for its next poll tick (event-driven, no busy-poll).
+    this.wakeWorker();
+    return job;
   }
 
   private validate(kind: JobKind, body: unknown): unknown {
@@ -290,7 +296,10 @@ export class LocalApi {
       if (this.stopped) return;
       const job = this.store.nextQueued();
       if (!job) {
-        await sleep(5);
+        // Event-driven idle wait (no busy-poll): park until a job is enqueued
+        // or the service is closing. The safety-net timeout covers a notify
+        // that raced ahead of the wait; close() calls wakeWorker() directly.
+        await this.waitForWork();
         continue;
       }
       this.current = job;
@@ -334,6 +343,33 @@ export class LocalApi {
     for (const res of job.sse) writeSse(res, payload);
   }
 
+  /**
+   * Park the worker until there is work. Resolves as soon as {@link wakeWorker}
+   * fires (a job was enqueued, or the service is closing); a 1s safety-net
+   * timer resolves it too, so a notify that lands in the tiny window between
+   * the worker checking the queue and it starting to wait can never hang the
+   * worker for more than a second.
+   */
+  private waitForWork(): Promise<void> {
+    return new Promise((resolve) => {
+      const finish = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      this.wakeResolvers.push(finish);
+      // unref so the safety net alone never keeps the process alive.
+      const timer = setTimeout(finish, 1000);
+      timer.unref?.();
+    });
+  }
+
+  /** Wake any parked worker(s). Called on enqueue() and on close(). */
+  private wakeWorker(): void {
+    const resolvers = this.wakeResolvers;
+    this.wakeResolvers = [];
+    for (const r of resolvers) r();
+  }
+
   /** Register an SSE stream for a job. Returns a cleanup function. */
   subscribe(job: Job, res: ServerResponse): void {
     res.writeHead(200, {
@@ -369,6 +405,9 @@ export class LocalApi {
   async close(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    // A parked worker would otherwise wait out its safety-net timeout before
+    // noticing `stopped`; wake it so close() returns promptly.
+    this.wakeWorker();
     const server = this.server;
     this.server = null;
     if (server) {
@@ -575,10 +614,6 @@ function endSse(res: ServerResponse, payload: Record<string, unknown>): void {
   if (res.writableEnded) return;
   writeSse(res, payload);
   res.end();
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
 }
 
 /**
