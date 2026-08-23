@@ -415,12 +415,13 @@ describe("createSandy: engine wiring (PRD §7)", () => {
 });
 
 describe("runCli: verbs + exit codes (real stdio MCP server)", () => {
-  // The CLI builds createSandy internally and cannot inject a detection dep,
-  // so pin the real-detection path via the test override to a concrete runtime
-  // ("docker"; the declared runtime stays "custom"). This keeps the CLI tests
-  // deterministic on any host (CI runs on a bare VM where detectRuntime()
-  // reports "none", which a custom-declared boundary would flag as degraded).
-  process.env["SANDY_TEST_RUNTIME"] = "docker";
+  // The CLI builds createSandy internally; runCli's second parameter lets a
+  // caller inject SandyDeps overrides (detection, in this case) without any
+  // ambient env var. This keeps the CLI tests deterministic on any host (CI
+  // runs on a bare VM where detectRuntime() reports "none", which a
+  // custom-declared boundary would flag as degraded) with no production code
+  // path able to spoof sandbox detection.
+  const cliOverrides = { detection: () => ({ runtime: "docker" as const, evidence: ["test override"] }) };
 
   const stdioCommand = [process.execPath, fixtureServer];
 
@@ -465,7 +466,7 @@ describe("runCli: verbs + exit codes (real stdio MCP server)", () => {
   it("check --json exits 0 and emits a parseable, healthy report", async () => {
     const { cfg } = await fixtures();
     const { value, stdout } = await captureStdout(() =>
-      runCli(["check", "--config", cfg, "--json", "--no-progress"]),
+      runCli(["check", "--config", cfg, "--json", "--no-progress"], cliOverrides),
     );
     expect(value).toBe(EXIT.ok);
     const parsed = JSON.parse(stdout) as { ok: boolean; mcp: { connected: string[] } };
@@ -476,7 +477,7 @@ describe("runCli: verbs + exit codes (real stdio MCP server)", () => {
   it("run <request> exits 0 and writes a confined report", async () => {
     const { cfg, ws, req } = await fixtures();
     const { value } = await captureStdout(() =>
-      runCli(["run", req, "--config", cfg, "--no-progress"]),
+      runCli(["run", req, "--config", cfg, "--no-progress"], cliOverrides),
     );
     expect(value).toBe(EXIT.ok);
     const report = await fsRead(path.join(ws, "reports", "deals.md"), "utf8");
@@ -485,7 +486,7 @@ describe("runCli: verbs + exit codes (real stdio MCP server)", () => {
   });
 
   it("missing config file exits with the config code (fail-closed)", async () => {
-    const { value } = await captureStdout(() => runCli(["check", "--config", path.join(root, "nope.json")]));
+    const { value } = await captureStdout(() => runCli(["check", "--config", path.join(root, "nope.json")], cliOverrides));
     expect(value).toBe(EXIT.config);
   });
 
@@ -493,7 +494,7 @@ describe("runCli: verbs + exit codes (real stdio MCP server)", () => {
     const ws = await tmpWorkspace();
     const bad = path.join(ws, "bad-request.json");
     await writeFile(bad, JSON.stringify({ goal: "x", gather: [] }));
-    const { value } = await captureStdout(() => runCli(["run", bad, "--config", path.join(root, "nope.json")]));
+    const { value } = await captureStdout(() => runCli(["run", bad, "--config", path.join(root, "nope.json")], cliOverrides));
     expect(value).toBe(EXIT.usage);
   });
 

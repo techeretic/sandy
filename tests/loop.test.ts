@@ -426,7 +426,7 @@ describe("AutonomousLoop (Phase 2, design §2.1)", () => {
 });
 
 describe("runCli: `ask` verb (standalone)", () => {
-  process.env["SANDY_TEST_RUNTIME"] = "docker";
+  const cliOverrides = { detection: () => ({ runtime: "docker" as const, evidence: ["test override"] }) };
   const fixtureServer = fileURLToPath(new URL("./fixtures/stdio-mcp-server.mjs", import.meta.url));
   const stdioCommand = [process.execPath, fixtureServer];
 
@@ -494,13 +494,13 @@ describe("runCli: `ask` verb (standalone)", () => {
     const cfgPath = path.join(ws, "sandy.json");
     await writeFile(cfgPath, JSON.stringify(main, null, 2));
 
-    const { value, stderr } = await captureStdout(() => runCli(["ask", "do a thing", "--config", cfgPath]));
+    const { value, stderr } = await captureStdout(() => runCli(["ask", "do a thing", "--config", cfgPath], cliOverrides));
     expect(value).toBe(EXIT.usage);
     expect(stderr).toContain("host");
   });
 
   it("missing goal exits with the usage code", async () => {
-    const { value } = await captureStdout(() => runCli(["ask", "--config", path.join(root, "nope.json")]));
+    const { value } = await captureStdout(() => runCli(["ask", "--config", path.join(root, "nope.json")], cliOverrides));
     expect(value).toBe(EXIT.usage);
   });
 });

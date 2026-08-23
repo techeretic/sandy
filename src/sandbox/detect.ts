@@ -98,13 +98,6 @@ function inDocker(ctx: DetectionContext): boolean {
  * Order matters: nested sandboxes report the outermost detectable one first.
  */
 export function detectRuntime(ctx: DetectionContext = defaultContext()): RuntimeDetection {
-  // Test-only override: lets tests that exercise the real detection path
-  // (e.g. the CLI, which builds createSandy internally and cannot inject a
-  // detection dep) pin a runtime and stay deterministic on any host.
-  const override = ctx.env["SANDY_TEST_RUNTIME"];
-  if (override !== undefined) {
-    return { runtime: (override as RuntimeDetection["runtime"]) || "none", evidence: ["test override"] };
-  }
   if (inGvisor(ctx)) return { runtime: "gvisor", evidence: ["gVisor sentry characteristics"] };
   if (inFirejail(ctx)) return { runtime: "firejail", evidence: ["FIREJAIL env or /.firejail marker"] };
   if (inDocker(ctx)) {

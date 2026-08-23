@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { ConfigError } from "./config/loader.js";
 import { SandboxViolationError } from "./sandbox/confinement.js";
 import { orchestratorRequestSchema, toOrchestratorRequest } from "./orchestrator/request.js";
-import { createSandy, type Sandy, type SandyCheckReport } from "./sandy.js";
+import { createSandy, type Sandy, type SandyCheckReport, type SandyDeps } from "./sandy.js";
 import type { OrchestratorResult, ProgressEvent } from "./orchestrator/orchestrator.js";
 import { NoModelEngineError, type LoopResult } from "./standalone/loop.js";
 import { createLocalApi } from "./standalone/api.js";
@@ -315,6 +315,7 @@ class RunError extends Error {
 async function withSandy<T>(
   args: ParsedArgs,
   fn: (sandy: Sandy) => T | Promise<T>,
+  overrides: Partial<SandyDeps> = {},
 ): Promise<T> {
   const sandyPath = resolveConfigPath(args.configPath);
   const sink = progressSink(args.progress);
@@ -322,6 +323,7 @@ async function withSandy<T>(
     sandyPath,
     auditFile: args.auditFile,
     onProgress: sink,
+    ...overrides,
   });
   try {
     return await fn(sandy);
@@ -339,13 +341,14 @@ async function withSandy<T>(
  * model process, closes MCP, and flushes the audit — in that order, so nothing
  * is orphaned. A dead model is reported via /health, not a crash.
  */
-async function runServe(args: ParsedArgs): Promise<number> {
+async function runServe(args: ParsedArgs, overrides: Partial<SandyDeps> = {}): Promise<number> {
   const sandyPath = resolveConfigPath(args.configPath);
   const sink = progressSink(args.progress);
   const sandy = await createSandy({
     sandyPath,
     auditFile: args.auditFile,
     onProgress: sink,
+    ...overrides,
   });
   // Eager engine start (§6): a service wants a ready model up-front.
   try {
@@ -401,7 +404,7 @@ function translateError(err: unknown): RunError {
  * code. All output goes to stdout (result) / stderr (progress + errors), so
  * `--json` output is clean for piping.
  */
-export async function runCli(argv: string[]): Promise<number> {
+export async function runCli(argv: string[], overrides: Partial<SandyDeps> = {}): Promise<number> {
   const args = parseArgs(argv);
   if (args.help) {
     printHelp();
@@ -418,23 +421,23 @@ export async function runCli(argv: string[]): Promise<number> {
 
   try {
     if (args.verb === "check") {
-      const report = await withSandy(args, (s) => s.check());
+      const report = await withSandy(args, (s) => s.check(), overrides);
       if (args.json) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
       else process.stdout.write(formatCheckText(report, args.auditFile) + "\n");
       return EXIT.ok;
     }
     if (args.verb === "serve") {
-      return await runServe(args);
+      return await runServe(args, overrides);
     }
     if (args.verb === "ask") {
-      const result = await withSandy(args, (s) => s.ask(args.goal!));
+      const result = await withSandy(args, (s) => s.ask(args.goal!), overrides);
       if (args.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
       else process.stdout.write(formatAskText(result, args.auditFile) + "\n");
       return EXIT.ok;
     }
     // verb === "run"
     const request = await loadRequest(args.requestFile!);
-    const result = await withSandy(args, (s) => s.run(request));
+    const result = await withSandy(args, (s) => s.run(request), overrides);
     if (args.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     else process.stdout.write(formatRunText(result, args.auditFile) + "\n");
     return EXIT.ok;
