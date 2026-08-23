@@ -99,7 +99,7 @@ export class ManagedServer {
    */
   async connect(): Promise<void> {
     if (this.closed) throw new McpCallError(this.name, "*", "server-unhealthy", "server is closed", false);
-    const client = new Client({ name: "sandy", version: "0.1.0" });
+    const client = new Client({ name: "sandy", version: "0.1.1" });
     const factory =
       this.options.transportFactory ??
       ((s: McpServer, r: SecretResolver) => createTransport(s, r, this.options.guard, globalThis.fetch));

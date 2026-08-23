@@ -347,3 +347,11 @@ Closed finding M12 from the 2026-08-22 full-repo review (fix plan `reviews/2026-
   - variant override without explicit hash → FAILs closed, no binary left.
   - happy path (correct default hash, model pre-seeded) → "llama.cpp tarball verified" → extracts → `llama-server` installed **executable** → config block printed.
   - `bash -n` clean.
+
+### Release — v0.1.1: first cut with all 7 security fixes, 2026-08-23
+
+Cut **v0.1.1** — the first version containing every security fix from the 2026-08-22 full-repo review, closing the 7 private advisories (GHSA-h5c5-76pv-6g85, GHSA-38wj-6mjh-2jf9, GHSA-qx23-r762-x2j9, GHSA-w84c-rwhv-mrgx, GHSA-r885-qm59-2mxf, GHSA-rm4r-g5vv-mvrm, GHSA-6q24-xhv7-3jg6).
+
+- **Version bump 0.1.0 → 0.1.1** in `package.json`, `package-lock.json` (top + root package), `plugin/.claude-plugin/plugin.json`, and the two runtime identity strings (`src/plugin/mcp-server.ts` McpServer version, `src/mcp/managed-server.ts` Client version). `dist/` is gitignored (rebuilt by CI). No test/conformance/CI dependency on the old literal (the conformance signature compares same-build Docker vs Firejail, so identical version bumps on both cannot break the identity check).
+- **Tag** `v0.1.1` + GitHub release; the 7 advisory drafts now point at a real, published `patched_versions: 0.1.1`.
+- **Verified:** typecheck + build green; **178/178 tests**.
