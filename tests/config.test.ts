@@ -220,6 +220,60 @@ describe("loadSandyConfig", () => {
     }
   });
 
+  it("allows an MCP server URL at the scheme's explicit default port when allowed_network declares that port", async () => {
+    const main = {
+      ...validMain,
+      sandbox: { ...validMain.sandbox, allowed_network: ["internal.company.com:443"] },
+    };
+    const manifest = {
+      ...validManifest,
+      servers: [
+        {
+          name: "docs",
+          transport: "http",
+          url: "https://internal.company.com:443/mcp",
+          version: "1.0.0",
+          capabilities: ["read"],
+          allowed_tools: ["read"],
+        },
+      ],
+    };
+    const { dir, sandyPath } = await makeFixture(main, manifest);
+    try {
+      const loaded = await loadSandyConfig(sandyPath, env);
+      expect(loaded.manifest.servers).toHaveLength(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("enforces VPN-02 for a default-port URL when allowed_network omits the port", async () => {
+    const main = {
+      ...validMain,
+      sandbox: { ...validMain.sandbox, allowed_network: ["internal.company.com"] },
+    };
+    const manifest = {
+      ...validManifest,
+      servers: [
+        {
+          name: "docs",
+          transport: "http",
+          url: "https://internal.company.com/mcp",
+          version: "1.0.0",
+          capabilities: ["read"],
+          allowed_tools: ["read"],
+        },
+      ],
+    };
+    const { dir, sandyPath } = await makeFixture(main, manifest);
+    try {
+      const loaded = await loadSandyConfig(sandyPath, env);
+      expect(loaded.manifest.servers).toHaveLength(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a policy that drops delete confirmation (FM-04)", async () => {
     const main = {
       ...validMain,
