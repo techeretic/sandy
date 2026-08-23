@@ -120,4 +120,9 @@ Next: **Phase 1, Phase 2, and the real-model end-to-end are complete** — the f
 
 ## License
 
-TBD
+[Apache License 2.0](LICENSE) — see the `LICENSE` file.
+
+Sandy is distributed under Apache-2.0. The bundled default model
+(Qwen3-4B-Instruct) is itself [Apache-2.0](docs/MODEL.md), and the
+`llama.cpp` runtime it runs on is MIT-licensed — both compatible with this
+license. See `docs/MODEL.md` for the model's exact license and provenance.

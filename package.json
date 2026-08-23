@@ -3,6 +3,7 @@
   "version": "0.1.1",
   "private": true,
   "type": "module",
+  "license": "Apache-2.0",
   "description": "Sandy — SANDBOXable AI assistant. MCP-only, VPN-safe, audit-logged.",
   "engines": {
     "node": ">=22"
@@ -17,7 +18,8 @@
     "bin",
     "plugin",
     "scripts",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "exports": {
     ".": {
