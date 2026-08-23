@@ -389,6 +389,16 @@ export class ApiError extends Error {
 // --- HTTP handling -----------------------------------------------------------
 
 async function readJsonBody(req: IncomingMessage, maxBytes: number): Promise<unknown> {
+  // A JSON Content-Type forces a browser to preflight a cross-origin request,
+  // which this server never grants (no Access-Control-Allow-Origin). A
+  // CORS-simple content type (text/plain, etc.) would otherwise reach the
+  // body with no preflight and no same-origin check — refuse it outright
+  // (GHSA-qx23-r762-x2j9). The Origin check in handleRequest is an
+  // independent second layer.
+  const contentType = req.headers["content-type"];
+  if (contentType !== undefined && !contentType.toLowerCase().startsWith("application/json")) {
+    throw new ApiError(415, `unsupported content-type "${contentType}"; expected application/json`);
+  }
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
@@ -446,6 +456,22 @@ async function handleRequest(
   const url = new URL(req.url ?? "/", "http://localhost");
   const method = req.method ?? "GET";
   const parts = url.pathname.split("/").filter(Boolean); // e.g. ["jobs","job-1","events"]
+
+  // Defense in depth against a browser-originated cross-origin request: a
+  // legitimate local caller (curl, the Sandy CLI, a Node script) never sends
+  // an Origin header at all; only a browser does. This API is loopback-only
+  // and unauthenticated by design (SD-03), so an Origin header from anywhere
+  // other than this server's own bound address is refused outright, rather
+  // than relying solely on the browser's CORS-preflight behavior for
+  // requests whose Content-Type happens to require one (GHSA-qx23-r762-x2j9).
+  const origin = req.headers.origin;
+  if (typeof origin === "string") {
+    const selfOrigin = `http://${req.headers.host ?? ""}`;
+    if (origin !== selfOrigin) {
+      send(res, 403, { error: "cross-origin requests are not permitted" });
+      return;
+    }
+  }
 
   // GET /health
   if (method === "GET" && url.pathname === "/health") {
