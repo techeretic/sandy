@@ -334,3 +334,16 @@ Closed finding M2 from the 2026-08-22 full-repo review (fix plan `reviews/2026-0
 - **Fix `rename()`:** it now `stat`s the destination; when it exists, it requires the (forced-minimum) `"overwrite"` confirmation **in addition to** (not instead of) the existing `"rename"` gate, mirroring `write()`. `requireConfirmation` short-circuits on `options.confirmed`, so a single `{confirmed:true}` satisfies both — no behavior change for a confirmed rename onto an existing file.
 - **Tests (+2, 171/171):** `tests/files.test.ts` — `rename()` onto an existing destination **without** confirmation must reject with `ConfirmationRequiredError` (and leave the destination untouched); **with** `{confirmed:true}` it must apply and clobber. TDD: red → green.
 - **Verified:** typecheck + build green; **171/171 tests** (was 169, +2); all 4 existing rename tests (all pass `confirmed:true`) unregressed; the two that expect an error (outside-sandbox, into-ignored) throw at `resolve`/`assertNotIgnored` before the new check.
+
+### Security — GHSA-6q24-xhv7-3jg6: verify the llama-server binary's integrity before executing it, 2026-08-23
+
+Closed finding M12 from the 2026-08-22 full-repo review (fix plan `reviews/2026-08-22-fix-plan-medium-low-priority.md` Task M12), tracked as private advisory **GHSA-6q24-xhv7-3jg6** (CWE-353/CWE-494). `scripts/provision-model.sh` SHA256-pins and fail-closed-verifies the model GGUF (`MODEL_SHA256`, verified after download, file removed on mismatch). The `llama-server` binary — downloaded from a GitHub release tarball, extracted, `chmod +x`'d, and later executed as a subprocess — had **no checksum or signature check at all**. This is backwards from a risk standpoint: the binary is executable code; the model is inert weights. A compromised release asset or a MITM'd download would run completely undetected on whatever host provisions and runs the standalone service.
+
+- **Pinned the llama.cpp tarball** (`scripts/provision-model.sh`): a new `DEFAULT_LLAMA_SHA256` (computed for real, not fabricated — the plan forbids it) for the default `b10569` / `ubuntu-vulkan-x64` release+variant, overridable via `SANDY_LLAMA_SHA256`. Verification runs **before** extraction: a mismatch removes the tarball and fails closed ("refusing to extract/run an unverified binary").
+- **Fail closed on override:** if `SANDY_LLAMA_RELEASE`/`SANDY_LLM_VARIANT` is overridden from the pinned default *without* an explicit `SANDY_LLAMA_SHA256`, the script fails closed (with a message showing how to compute the hash) rather than silently skipping verification of a binary it is about to execute.
+- **Docs:** `docs/MODEL.md` gained a "the runtime is integrity-pinned too" section documenting the release/variant/SHA256 pin and the override behavior, matching the model-pin structure.
+- **Verified (no TS change, so `npm test` is 169/169 as before; the script was tested end-to-end with network):**
+  - hash mismatch → FAILs closed, **no binary left** in the install dir.
+  - variant override without explicit hash → FAILs closed, no binary left.
+  - happy path (correct default hash, model pre-seeded) → "llama.cpp tarball verified" → extracts → `llama-server` installed **executable** → config block printed.
+  - `bash -n` clean.

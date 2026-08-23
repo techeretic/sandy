@@ -90,6 +90,31 @@ build, which uses the standard GPU driver (NVIDIA/AMD/Intel) — no separate CUD
 install. On a CPU-only box, use the `ubuntu-x64` (CPU) variant instead
 (`SANDY_LLM_VARIANT=ubuntu-x64`).
 
+### The runtime is integrity-pinned too (not just the model)
+
+The model GGUF is inert weights, but `llama-server` is **executable code** that
+the helper `chmod +x`s and runs as a subprocess. The helper therefore verifies
+the **llama.cpp release tarball** by SHA256 **before** extracting or running it —
+fail-closed, the same way it verifies the model (a mismatch is removed and
+aborts; nothing unverified is ever executed). This matters more than the model
+pin: a compromised release asset or a MITM'd download would otherwise run
+undetected on the provisioning host.
+
+| Property | Value |
+|----------|-------|
+| Release | `b10569` |
+| Variant | `ubuntu-vulkan-x64` (Vulkan GPU build; the CPU build is `ubuntu-x64`) |
+| Artifact | `llama-b10569-bin-ubuntu-vulkan-x64.tar.gz` (GitHub release) |
+| SHA256 | `a6ae15547658207b17032f81e77eef935e304503f7bbf1243919f5d9e7c16a33` |
+
+Overriding the pin: the built-in hash applies **only** to the default
+`b10569` / `ubuntu-vulkan-x64` release+variant. If you override either
+(`SANDY_LLAMA_RELEASE` / `SANDY_LLM_VARIANT`), the helper **fails closed** unless
+you also supply an explicit hash via `SANDY_LLAMA_SHA256` — it never silently
+skips verification of a binary it is about to execute. To pin a different
+release/variant, compute its hash (`curl -fsSL -o /tmp/x.tar.gz <release-url> &&
+sha256sum /tmp/x.tar.gz`) and pass it as `SANDY_LLAMA_SHA256`.
+
 ## Resource limits (design §4.5 — settled)
 
 **Decision: map the declared sandbox caps to real levers now; the hard ceiling
