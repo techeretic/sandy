@@ -21,6 +21,7 @@ export {
   type SandyConfig,
 } from "./config/schema.js";
 export {
+  endpointMatches,
   NetworkEgressError,
   NetworkGuard,
   type EndpointMatch,
