@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -169,6 +169,28 @@ describe("FileManager: directories (FM-02)", () => {
 
     await fm.deleteDirectory("dirtree", { confirmed: true });
     expect(await existsAny(path.join(workspace, "dirtree"))).toBe(false);
+  });
+
+  it("deleteDirectory() does not snapshot when policy.dry_run_default is true and dryRun is omitted", async () => {
+    // A true dry run must never read file contents. With the old code the
+    // snapshot decision used `options.dryRun ?? false` (ignoring the policy
+    // default) while the delete decision used `options.dryRun ??
+    // policy.dry_run_default`, so a policy-default dry run still did a full
+    // recursive read of the subtree — and threw on an unreadable file.
+    if (typeof process.getuid === "function" && process.getuid() === 0) {
+      return; // chmod-based unreadability is ineffective for root
+    }
+    const fm = manager({ dry_run_default: true });
+    await fm.write("drytree/one.txt", "x", { dryRun: false }); // actually materialize it
+    const f = path.join(workspace, "drytree/one.txt");
+    await chmod(f, 0o000);
+    try {
+      const result = await fm.deleteDirectory("drytree", { confirmed: true }); // dryRun deliberately omitted
+      expect(result.applied).toBe(false); // policy default made this a dry run
+      expect(result.journaled).toBeUndefined();
+    } finally {
+      await chmod(f, 0o644);
+    }
   });
 
   it("does not create parent directories implicitly", async () => {
