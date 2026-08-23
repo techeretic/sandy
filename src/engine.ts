@@ -481,6 +481,12 @@ export class LlamaCppEngine implements LlmEngine {
         outcome: "error",
         error: (err as Error).message,
       });
+      // A failed invocation may have left the server in a bad state (or just
+      // timed out mid-request) -- kill it rather than leaving it running while
+      // we report degraded, so the next start() doesn't leak this process when
+      // it spawns a replacement (this.child would otherwise be silently
+      // overwritten, orphaning a live llama-server per failed invocation).
+      await this.killChild();
       this.state = "degraded";
       this.detail = (err as Error).message;
       throw err;

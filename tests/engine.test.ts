@@ -216,6 +216,32 @@ describe("LlamaCppEngine (local, in-sandbox loopback)", () => {
     expect(child.killedSignals.length).toBeGreaterThan(0);
   });
 
+  it("invoke() kills the child process when the request fails, so the next start() does not orphan it", async () => {
+    const child = new FakeChild(["Server listening at http://127.0.0.1:8081"]);
+    const fake = fakeFetch((url) => {
+      if (url.endsWith("/health")) return new Response("ok", { status: 200 });
+      throw new Error("model server exploded mid-request");
+    });
+    const e = new LlamaCppEngine({
+      audit: audit(),
+      modelPath: EXISTING_FILE,
+      model: "m",
+      spawnFactory: () => {
+        child.emitReady();
+        return child.asChild();
+      },
+      fetchImpl: fake.fn,
+      logSink: () => {},
+    });
+    await e.start();
+    expect(e.status().status).toBe("ready");
+    await expect(e.invoke({ prompt: "hi" })).rejects.toThrow(/exploded/);
+    // The still-running model server must be torn down on failure, not left
+    // alive for the next start()'s `this.child = spawnFactory(...)` to silently
+    // overwrite (one orphaned llama-server per failed invocation).
+    expect(child.killedSignals).toContain("SIGTERM");
+  });
+
   it("discovers the port when the server announces it on STDERR (the real llama-server)", async () => {
     // The real `llama-server` logs to stderr, not stdout. A prior engine read
     // only stdout, so a real model would time out here. This pins the fix.
