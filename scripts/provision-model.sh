@@ -33,6 +33,10 @@ LLAMA_RELEASE="${SANDY_LLAMA_RELEASE:-b10569}"
 LLAMA_VARIANT="${SANDY_LLM_VARIANT:-ubuntu-vulkan-x64}"   # vulkan = GPU, no CUDA toolkit
 LLAMA_URL="https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_RELEASE}/llama-${LLAMA_RELEASE}-bin-${LLAMA_VARIANT}.tar.gz"
 LLAMA_EXTRACT_DIR="llama-${LLAMA_RELEASE}"
+# SHA256 of the default (release, variant) pin above -- pinned the same way the
+# model is, since this tarball becomes executable code we chmod +x and run.
+DEFAULT_LLAMA_SHA256="a6ae15547658207b17032f81e77eef935e304503f7bbf1243919f5d9e7c16a33"
+LLAMA_SHA256="${SANDY_LLAMA_SHA256:-$DEFAULT_LLAMA_SHA256}"
 
 MODEL_URL="${SANDY_MODEL_URL:-$DEFAULT_MODEL_URL}"
 MODEL_SHA256="${SANDY_MODEL_SHA256:-$DEFAULT_MODEL_SHA256}"
@@ -55,6 +59,21 @@ trap 'rm -rf "$TMP"' EXIT
 # --- 1. llama-server (the local model runtime) -------------------------------
 log "downloading llama.cpp ${LLAMA_RELEASE} (${LLAMA_VARIANT})"
 curl -fsSL --max-time 1200 -o "$TMP/llama.tar.gz" "$LLAMA_URL" || fail "llama.cpp download failed: $LLAMA_URL"
+
+# If the release/variant was overridden from the pinned default, the built-in
+# hash does not apply: fail closed unless an explicit hash is supplied, rather
+# than silently skipping verification of a binary we are about to execute.
+if { [ "$LLAMA_RELEASE" != "b10569" ] || [ "$LLAMA_VARIANT" != "ubuntu-vulkan-x64" ]; } && [ -z "${SANDY_LLAMA_SHA256:-}" ]; then
+  fail "SANDY_LLAMA_RELEASE/SANDY_LLM_VARIANT was overridden from the pinned default (b10569 / ubuntu-vulkan-x64), so the built-in llama-server hash does not apply. Set SANDY_LLAMA_SHA256 explicitly (compute it with: curl -fsSL -o /tmp/x.tar.gz '$LLAMA_URL' && sha256sum /tmp/x.tar.gz), or unset the override to use the pinned default."
+fi
+log "verifying llama.cpp tarball SHA256 (fail-closed; this becomes executable code)"
+ACTUAL_LLAMA="$(sha256sum "$TMP/llama.tar.gz" | awk '{print $1}')"
+if [ "$ACTUAL_LLAMA" != "$LLAMA_SHA256" ]; then
+  rm -f "$TMP/llama.tar.gz"
+  fail "llama.cpp tarball hash mismatch (expected $LLAMA_SHA256, got $ACTUAL_LLAMA) — refusing to extract/run an unverified binary"
+fi
+log "llama.cpp tarball verified"
+
 tar xzf "$TMP/llama.tar.gz" -C "$TMP" || fail "llama.cpp tarball is corrupt"
 [ -f "$TMP/$LLAMA_EXTRACT_DIR/llama-server" ] || fail "llama-server binary not found in the tarball (unexpected layout)"
 # Flatten into a STABLE path so the config does not churn when the release

@@ -292,3 +292,16 @@ Closed the High finding from the 2026-08-22 full-repo review (§H1, fix plan `re
 - **Threaded the existing injection seam through the CLI** so tests keep determinism without any production-reachable hook: `runCli(argv, overrides?: Partial<SandyDeps>)` gained an optional second parameter, forwarded through `withSandy()`/`runServe()` into `createSandy()`. `bin/sandy.js` and the direct-run guard call `runCli` with one argument — **no production code path can inject a detection override**.
 - **Tests** (`tests/sandy.test.ts`, `tests/loop.test.ts`): the two `runCli` describe blocks that set `process.env["SANDY_TEST_RUNTIME"] = "docker"` now pass `{ detection: () => ({ runtime: "docker", evidence: ["test override"] }) }` as the second argument — same pinned-detection behavior, no env var. Zero test *behavior* changed (169/169, same count).
 - **Verified:** typecheck + build green; **169/169 tests**; `grep -rn SANDY_TEST_RUNTIME` (excl. reviews/) → no matches.
+
+### Security — GHSA-6q24-xhv7-3jg6: verify the llama-server binary's integrity before executing it, 2026-08-23
+
+Closed finding M12 from the 2026-08-22 full-repo review (fix plan `reviews/2026-08-22-fix-plan-medium-low-priority.md` Task M12), tracked as private advisory **GHSA-6q24-xhv7-3jg6** (CWE-353/CWE-494). `scripts/provision-model.sh` SHA256-pins and fail-closed-verifies the model GGUF (`MODEL_SHA256`, verified after download, file removed on mismatch). The `llama-server` binary — downloaded from a GitHub release tarball, extracted, `chmod +x`'d, and later executed as a subprocess — had **no checksum or signature check at all**. This is backwards from a risk standpoint: the binary is executable code; the model is inert weights. A compromised release asset or a MITM'd download would run completely undetected on whatever host provisions and runs the standalone service.
+
+- **Pinned the llama.cpp tarball** (`scripts/provision-model.sh`): a new `DEFAULT_LLAMA_SHA256` (computed for real, not fabricated — the plan forbids it) for the default `b10569` / `ubuntu-vulkan-x64` release+variant, overridable via `SANDY_LLAMA_SHA256`. Verification runs **before** extraction: a mismatch removes the tarball and fails closed ("refusing to extract/run an unverified binary").
+- **Fail closed on override:** if `SANDY_LLAMA_RELEASE`/`SANDY_LLM_VARIANT` is overridden from the pinned default *without* an explicit `SANDY_LLAMA_SHA256`, the script fails closed (with a message showing how to compute the hash) rather than silently skipping verification of a binary it is about to execute.
+- **Docs:** `docs/MODEL.md` gained a "the runtime is integrity-pinned too" section documenting the release/variant/SHA256 pin and the override behavior, matching the model-pin structure.
+- **Verified (no TS change, so `npm test` is 169/169 as before; the script was tested end-to-end with network):**
+  - hash mismatch → FAILs closed, **no binary left** in the install dir.
+  - variant override without explicit hash → FAILs closed, no binary left.
+  - happy path (correct default hash, model pre-seeded) → "llama.cpp tarball verified" → extracts → `llama-server` installed **executable** → config block printed.
+  - `bash -n` clean.
