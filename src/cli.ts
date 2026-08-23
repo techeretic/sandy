@@ -378,7 +378,17 @@ async function runServe(args: ParsedArgs, overrides: Partial<SandyDeps> = {}): P
         try {
           await api.close();
         } finally {
-          await sandy.close();
+          try {
+            await sandy.close();
+          } catch (err) {
+            // close() can now surface a failed audit flush (AU-01). That
+            // failure was already logged to stderr when it happened; report it
+            // cleanly here rather than letting shutdown crash with an unhandled
+            // rejection.
+            process.stderr.write(
+              `sandy: shutdown error: ${err instanceof Error ? err.message : String(err)}\n`,
+            );
+          }
         }
         resolve();
       })();

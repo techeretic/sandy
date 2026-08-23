@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -390,6 +390,39 @@ describe("Audit logging (AU-01/02/03)", () => {
     expect(parsed.map((p) => p.type)).toEqual(["session_start", "mcp_call", "session_end"]);
   });
 
+  it("close() rejects if a JSONL write ever failed during the session", async () => {
+    // Make the write fail reliably: put a *file* at the parent path, so the
+    // logger's mkdir(path.dirname(filePath)) fails with ENOTDIR. (Permission
+    // tricks behave inconsistently across CI runners and are meaningless as
+    // root.)
+    const blocker = path.join(dir, "blocker");
+    await writeFile(blocker, "not a directory");
+    try {
+      const logger = new JsonlAuditLogger(path.join(blocker, "audit.jsonl"));
+      logger.append("session_start", {});
+      await expect(logger.close()).rejects.toThrow();
+    } finally {
+      await rm(blocker);
+    }
+  });
+
+  it("keeps appending in-memory events after a failed disk write (and reports the first error at close)", async () => {
+    const blocker = path.join(dir, "blocker2");
+    await writeFile(blocker, "not a directory");
+    try {
+      const logger = new JsonlAuditLogger(path.join(blocker, "audit.jsonl"));
+      logger.append("session_start", {});
+      // The write fails asynchronously; append() itself must stay usable and
+      // must not surface an unhandled rejection.
+      const ev2 = logger.append("mcp_call", { server: "crm", tool: "read_deals" });
+      expect(ev2.seq).toBe(2);
+      expect(logger.events()).toHaveLength(2);
+      await expect(logger.close()).rejects.toThrow(/EEXIST|ENOENT|ENOTDIR|not a directory|failed/i);
+    } finally {
+      await rm(blocker);
+    }
+  });
+
   it("captures a session transcript (AU-03)", () => {
     const audit = new InMemoryAuditLogger();
     audit.append("session_start", { goal: "g", tasks: 1 });
@@ -438,6 +471,53 @@ describe("Orchestrator: end-to-end with report writing", () => {
     expect(result.reportPath).toBe(path.join(dir, "emea.md"));
     expect(await readFile(path.join(dir, "emea.md"), "utf8")).toContain("# EMEA Deals");
     expect(events.some((e) => e.type === "report-writing")).toBe(true);
+
+    await manager.close();
+    for (const s of servers) await s.close();
+    servers = [];
+  });
+
+  it("run() returns already-gathered claims/gaps even if the report write fails", async () => {
+    const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }]);
+    servers = [crm];
+    const manager = new McpClientManager(
+      [serverConfig("crm", ["read_deals"])],
+      resolver,
+      guard,
+      { retry: instantRetry, transportFactory: () => crm.transport },
+    );
+    await manager.connectAll();
+
+    const audit = new InMemoryAuditLogger();
+    const orch = new Orchestrator({
+      manager,
+      audit,
+      writeReport: async (_content, _file) => {
+        // Stand in for the real failure: a non-markdown extension makes
+        // FileManager.write()'s format validation reject the report content.
+        throw new Error('file operation failed (format-invalid): not valid Markdown');
+      },
+    });
+
+    const result = await orch.run({
+      goal: "deals report",
+      gather: [{ id: "deals", server: "crm", tool: "read_deals", args: { region: "emea" } }],
+      report: { title: "EMEA Deals", file: "summary.json" },
+    });
+
+    // The gathered data must survive the write failure, not be discarded.
+    expect(result.claims.length).toBeGreaterThan(0);
+    expect(result.reportPath).toBeUndefined();
+    expect(result.reportError).toBeDefined();
+    expect(result.reportError).toMatch(/format-invalid/);
+    // The rendered content is still available to the caller.
+    expect(result.reportContent).toContain("# EMEA Deals");
+    // The failure is audited, not lost.
+    const writeFail = audit
+      .events()
+      .filter((e) => e.type === "orchestrator_task" && e.data["task"] === "report-write");
+    expect(writeFail).toHaveLength(1);
+    expect(writeFail[0]!.data["outcome"]).toBe("error");
 
     await manager.close();
     for (const s of servers) await s.close();

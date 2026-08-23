@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -34,6 +34,23 @@ function manager(over: Partial<PolicyConfig> = {}, journalDepth?: number): FileM
     confinement: new PathConfinement([workspace]),
     policy: journalDepth !== undefined ? { ...p, undo_depth: journalDepth } : p,
   });
+}
+
+class RecordingAuditSink {
+  records: Array<{ op: string; path: string; outcome: "ok" | "error"; error?: string; dryRun?: boolean }> = [];
+  record(entry: { op: string; path: string; at: string; outcome: "ok" | "error"; error?: string; dryRun?: boolean }): void {
+    this.records.push(entry);
+  }
+}
+
+function managerWithAudit(over: Partial<PolicyConfig> = {}): { fm: FileManager; audit: RecordingAuditSink } {
+  const audit = new RecordingAuditSink();
+  const fm = new FileManager({
+    confinement: new PathConfinement([workspace]),
+    policy: policy(over),
+    audit,
+  });
+  return { fm, audit };
 }
 
 beforeAll(async () => {
@@ -169,6 +186,28 @@ describe("FileManager: directories (FM-02)", () => {
 
     await fm.deleteDirectory("dirtree", { confirmed: true });
     expect(await existsAny(path.join(workspace, "dirtree"))).toBe(false);
+  });
+
+  it("deleteDirectory() does not snapshot when policy.dry_run_default is true and dryRun is omitted", async () => {
+    // A true dry run must never read file contents. With the old code the
+    // snapshot decision used `options.dryRun ?? false` (ignoring the policy
+    // default) while the delete decision used `options.dryRun ??
+    // policy.dry_run_default`, so a policy-default dry run still did a full
+    // recursive read of the subtree — and threw on an unreadable file.
+    if (typeof process.getuid === "function" && process.getuid() === 0) {
+      return; // chmod-based unreadability is ineffective for root
+    }
+    const fm = manager({ dry_run_default: true });
+    await fm.write("drytree/one.txt", "x", { dryRun: false }); // actually materialize it
+    const f = path.join(workspace, "drytree/one.txt");
+    await chmod(f, 0o000);
+    try {
+      const result = await fm.deleteDirectory("drytree", { confirmed: true }); // dryRun deliberately omitted
+      expect(result.applied).toBe(false); // policy default made this a dry run
+      expect(result.journaled).toBeUndefined();
+    } finally {
+      await chmod(f, 0o644);
+    }
   });
 
   it("does not create parent directories implicitly", async () => {
@@ -350,6 +389,34 @@ describe("FileManager: undo journal (FM-05)", () => {
     await fm.undo();
     expect((await readFile(p)).equals(binary)).toBe(true);
     expect(await readFile(path.join(workspace, "bin-tree/notes.txt"), "utf8")).toBe("text");
+  });
+
+  it("undo() produces an audit record (AU-01)", async () => {
+    const { fm, audit } = managerWithAudit();
+    await fm.write("a.txt", "hello");
+    const before = audit.records.length;
+    const undone = await fm.undo();
+    expect(undone?.op).toBe("create-file");
+    expect(audit.records.length).toBe(before + 1);
+    const entry = audit.records.at(-1);
+    expect(entry).toBeDefined();
+    expect(entry?.op).toBe("undo(create-file)");
+    expect(entry?.outcome).toBe("ok");
+    expect(entry?.path).toBe(path.join(workspace, "a.txt"));
+  });
+
+  it("a failed undo records an audit error entry", async () => {
+    const { fm, audit } = managerWithAudit();
+    await fm.write("audit-sym.txt", "original");
+    // Swap the file for a symlink outside the root so the reversal fails.
+    await rm(path.join(workspace, "audit-sym.txt"));
+    await symlink(outside, path.join(workspace, "audit-sym.txt"));
+    await expect(fm.undo()).rejects.toThrow();
+    const entry = audit.records.at(-1);
+    expect(entry).toBeDefined();
+    expect(entry?.op).toBe("undo(create-file)");
+    expect(entry?.outcome).toBe("error");
+    expect(entry?.error).toBeTruthy();
   });
 
   it("undo re-checks confinement, refusing to follow a symlink swapped in after the original mutation", async () => {

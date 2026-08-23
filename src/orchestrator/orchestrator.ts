@@ -77,6 +77,9 @@ export interface OrchestratorResult {
   gaps: Gap[];
   reportPath?: string;
   reportContent?: string;
+  /** Set when report rendering succeeded but writing it to disk failed
+   *  (e.g. a format/extension mismatch) -- claims/gaps are still returned. */
+  reportError?: string;
   transcript: Transcript;
 }
 
@@ -225,6 +228,7 @@ export class Orchestrator {
 
     let reportPath: string | undefined;
     let reportContent: string | undefined;
+    let reportError: string | undefined;
     if (request.report) {
       const generatedAt = new Date().toISOString();
       reportContent = this.renderReport({
@@ -238,14 +242,28 @@ export class Orchestrator {
       const file = request.report.file ?? `report-${Date.now()}.md`;
       this.onProgress({ type: "report-writing", path: file });
       if (this.writeReport) {
-        reportPath = await this.writeReport(reportContent, file);
+        try {
+          reportPath = await this.writeReport(reportContent, file);
+        } catch (err) {
+          // A filename/format choice must not discard the data already
+          // gathered from (potentially many) successful MCP calls: surface the
+          // failure on the result and in the audit trail, and keep going.
+          reportError = err instanceof Error ? err.message : String(err);
+          this.audit.append("orchestrator_task", {
+            task: "report-write",
+            server: "sandy",
+            tool: "write-report",
+            outcome: "error",
+            error: reportError,
+          });
+        }
       }
     }
 
     this.onProgress({ type: "done", claims: claims.length, gaps: gaps.length });
-    this.audit.append("session_end", { claims: claims.length, gaps: gaps.length, report: reportPath ?? null });
+    this.audit.append("session_end", { claims: claims.length, gaps: gaps.length, report: reportPath ?? null, reportError: reportError ?? null });
 
-    return { goal: request.goal, claims, gaps, reportPath, reportContent, transcript: captureTranscript(this.audit) };
+    return { goal: request.goal, claims, gaps, reportPath, reportContent, reportError, transcript: captureTranscript(this.audit) };
   }
 
   /**

@@ -108,13 +108,41 @@ export class FileManager {
     this.policy = options.policy;
     this.audit = options.audit ?? new NullFileAuditSink();
     this.ignorePatterns = compilePatterns(options.policy.ignore_patterns);
-    const reverse: ReverseMutation = (record) => this.reverse(record);
+    // A failed undo must leave an audit trail just like a successful one
+    // (AU-01); the original error (e.g. SandboxViolationError from the
+    // re-checked confinement) is rethrown unchanged.
+    const reverse: ReverseMutation = async (record) => {
+      try {
+        await this.reverse(record);
+      } catch (err) {
+        this.audit.record({
+          op: `undo(${record.op})`,
+          path: record.path,
+          at: new Date().toISOString(),
+          outcome: "error",
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
+    };
     this.journal = options.journal ?? new InMemoryJournal(this.policy.undo_depth, reverse);
   }
 
   /** Undo the last journaled mutation (FM-05). Resolves undefined if none. */
-  undo(): Promise<MutationRecord | undefined> {
-    return this.journal.undo().then((r) => r?.undone);
+  async undo(): Promise<MutationRecord | undefined> {
+    const result = await this.journal.undo();
+    if (!result) return undefined;
+    // Every forward mutation is audited (AU-01); the reversal must be too,
+    // since undo is exactly the operation most likely to need forensic
+    // scrutiny. (A failed reversal is audited by the reverse callback
+    // wrapper in the constructor, where the record is still known.)
+    this.audit.record({
+      op: `undo(${result.undone.op})`,
+      path: result.undone.path,
+      at: new Date().toISOString(),
+      outcome: "ok",
+    });
+    return result.undone;
   }
 
   // --- Reads -----------------------------------------------------------
@@ -374,11 +402,11 @@ export class FileManager {
 
     this.requireConfirmation("delete", candidate, `delete directory ${abs} and all of its contents`, options);
 
-    const snapshot = dryRunOf(options)
-      ? null
-      : await snapshotDirectory(abs);
-
+    // One dry-run decision for both the snapshot and the delete: a dry run
+    // (explicit or via policy.dry_run_default) must never read the subtree,
+    // so an unreadable file cannot turn a no-op dry run into a hard failure.
     const dryRun = options.dryRun ?? this.policy.dry_run_default;
+    const snapshot = dryRun ? null : await snapshotDirectory(abs);
     if (!dryRun) {
       await this.io(candidate, () => rm(abs, { recursive: true }), { notFound: `cannot delete: ${abs}` });
     }
@@ -478,10 +506,6 @@ export class FileManager {
   private async rmSafe(p: string): Promise<void> {
     await rm(p, { force: true });
   }
-}
-
-function dryRunOf(options: FileOpOptions): boolean {
-  return options.dryRun ?? false;
 }
 
 export interface SubtreeSnapshot {

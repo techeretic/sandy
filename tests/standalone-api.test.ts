@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile, readFile as fsRead } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   createSandy,
   createLocalApi,
@@ -354,6 +354,33 @@ describe("LocalApi (Phase 2, design §5)", () => {
       });
       expect(sameOrigin.status).toBe(202);
     });
+  });
+
+  it("the idle worker does not busy-poll the job store (event-driven wake)", async () => {
+    const { api, base } = await makeApi();
+    // Count how often the serial worker reaches for the queue. The old worker
+    // polled every 5ms while idle (~200 calls in a 1s window); the
+    // event-driven worker parks until enqueue()/close() wakes it, so an idle
+    // stretch makes almost no calls.
+    const realNext = BoundedJobStore.prototype.nextQueued;
+    const nextQueued = vi
+      .spyOn(api.jobStore, "nextQueued")
+      .mockImplementation(function (this: BoundedJobStore) {
+        return realNext.call(this);
+      });
+    try {
+      // Let any in-flight work finish so the worker is idle, then measure the
+      // number of queue checks over a 1s idle window.
+      const { body } = await postRun(base, LEGAL_RUN);
+      await waitForJob(api, body.id!, "done");
+      await sleep(30); // let the worker loop back to the idle branch
+      const baseline = nextQueued.mock.calls.length;
+      await sleep(500); // an idle window; an old 5ms poller would fire ~100x
+      const idleCalls = nextQueued.mock.calls.length - baseline;
+      expect(idleCalls).toBeLessThan(25);
+    } finally {
+      nextQueued.mockRestore();
+    }
   });
 
   it("close() stops the service: new jobs are refused and the port is released", async () => {

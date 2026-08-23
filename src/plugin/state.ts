@@ -83,7 +83,11 @@ function describeProgress(e: ProgressEvent): string {
  * implicitly by creating a fresh plugin per test.
  */
 export class SessionCache {
-  private readonly sessions = new Map<string, PluginSession>();
+  // The in-flight promise itself is the cache value: reserving the slot
+  // synchronously (before any await) is what closes the get() race — two
+  // concurrent callers for the same config path both see the same promise and
+  // Sandy is constructed exactly once.
+  private readonly sessions = new Map<string, Promise<PluginSession>>();
 
   constructor(private readonly options: SandyPluginOptions) {}
 
@@ -91,25 +95,37 @@ export class SessionCache {
     return this.sessions.size;
   }
 
-  async get(configPath: string): Promise<PluginSession> {
+  get(configPath: string): Promise<PluginSession> {
     const resolved = path.resolve(configPath);
     const existing = this.sessions.get(resolved);
     if (existing) return existing;
 
     const progress = new ProgressCollector();
-    const sandy = await createSandy({
+    const sessionPromise = createSandy({
       ...this.options,
       sandyPath: resolved,
       onProgress: progress.sink,
-    });
-    const session: PluginSession = { sandy, configPath: resolved, progress };
-    this.sessions.set(resolved, session);
-    return session;
+    }).then(
+      (sandy) => ({ sandy, configPath: resolved, progress }),
+      (err) => {
+        // Don't leave a permanently-broken entry cached — let a later call
+        // retry construction from scratch.
+        this.sessions.delete(resolved);
+        throw err;
+      },
+    );
+    this.sessions.set(resolved, sessionPromise);
+    return sessionPromise;
   }
 
   async closeAll(): Promise<void> {
-    const sessions = [...this.sessions.values()];
+    const pending = [...this.sessions.values()];
     this.sessions.clear();
-    await Promise.all(sessions.map((s) => s.sandy.close()));
+    const sessions = await Promise.allSettled(pending);
+    await Promise.all(
+      sessions
+        .filter((r): r is PromiseFulfilledResult<PluginSession> => r.status === "fulfilled")
+        .map((r) => r.value.sandy.close()),
+    );
   }
 }

@@ -202,6 +202,37 @@ describe("NetworkGuard", () => {
     expect(guard.check("https://crm.internal/mcp")).toEqual({ ok: true });
   });
 
+  it("check() matches an endpoint declared without a port against a URL at the scheme's default port", () => {
+    const g = new NetworkGuard(["internal.company.com"]);
+    expect(g.check("https://internal.company.com/mcp")).toEqual({ ok: true });
+    expect(g.check("http://internal.company.com/mcp")).toEqual({ ok: true });
+    // A bare-host entry must NOT authorize a non-default port.
+    expect(g.check("https://internal.company.com:8443/mcp")).toEqual({
+      ok: false,
+      reason: "endpoint-not-declared",
+    });
+  });
+
+  it("check() matches an endpoint declared with an explicit default port against the same URL", () => {
+    const g = new NetworkGuard(["internal.company.com:443"]);
+    expect(g.check("https://internal.company.com/mcp")).toEqual({ ok: true });
+    expect(g.check("https://internal.company.com:443/mcp")).toEqual({ ok: true });
+    // A :443 entry must NOT authorize a non-default https port.
+    expect(g.check("https://internal.company.com:8443/mcp")).toEqual({
+      ok: false,
+      reason: "endpoint-not-declared",
+    });
+  });
+
+  it("check() keeps a bare-host entry bound to the URL's scheme for http default port", () => {
+    const g = new NetworkGuard(["api.internal:80"]);
+    expect(g.check("http://api.internal/")).toEqual({ ok: true });
+    expect(g.check("https://api.internal/")).toEqual({
+      ok: false,
+      reason: "endpoint-not-declared",
+    });
+  });
+
   it("blocks an undeclared endpoint (VPN-02)", () => {
     const verdict = guard.check("https://evil.example.com:8443/mcp");
     expect(verdict).toEqual({ ok: false, reason: "endpoint-not-declared" });

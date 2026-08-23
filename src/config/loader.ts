@@ -7,6 +7,7 @@ import {
   type McpServersManifest,
   type SandyConfig,
 } from "./schema.js";
+import { endpointMatches } from "../sandbox/network.js";
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -145,10 +146,10 @@ export async function loadSandyConfig(
   for (const server of manifest.servers) {
     if (server.transport !== "sse" && server.transport !== "http") continue;
     const url = new URL(server.url);
-    const endpoint = url.port ? `${url.hostname}:${url.port}` : url.hostname;
-    if (!config.sandbox.allowed_network.includes(endpoint)) {
+    if (!config.sandbox.allowed_network.some((entry) => endpointMatches(entry, url))) {
+      const port = url.port || (url.protocol === "https:" ? "443" : "80");
       throw new ConfigError(
-        `MCP server "${server.name}" targets ${endpoint}, which is not in sandbox.allowed_network (VPN-02: egress restricted to declared endpoints)`,
+        `MCP server "${server.name}" targets ${url.hostname}:${port}, which is not in sandbox.allowed_network (VPN-02: egress restricted to declared endpoints)`,
       );
     }
   }
