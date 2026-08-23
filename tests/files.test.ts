@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -267,6 +267,21 @@ describe("FileManager: undo journal (FM-05)", () => {
     await fm.undo();
     expect(await existsAny(path.join(workspace, "ren.txt"))).toBe(true);
     expect(await existsAny(path.join(workspace, "ren-moved.txt"))).toBe(false);
+  });
+
+  it("undo re-checks confinement, refusing to follow a symlink swapped in after the original mutation", async () => {
+    const fm = manager();
+    await fm.write("link-target.txt", "original content");
+    // Swap the file for a symlink pointing outside the confined root before undo runs.
+    await rm(path.join(workspace, "link-target.txt"));
+    await symlink(outside, path.join(workspace, "link-target.txt"));
+
+    // reverse() must re-resolve the journaled path through PathConfinement and
+    // refuse the symlink-escape (SandboxViolationError), rather than following
+    // the symlink with a bare fs call (TOCTOU escape, GHSA-w84c-rwhv-mrgx).
+    await expect(fm.undo()).rejects.toThrow(SandboxViolationError);
+    const leaked = await stat(path.join(outside, "should-not-exist")).catch(() => null);
+    expect(leaked).toBeNull();
   });
 });
 
