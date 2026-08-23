@@ -443,4 +443,51 @@ describe("Orchestrator: end-to-end with report writing", () => {
     for (const s of servers) await s.close();
     servers = [];
   });
+
+  it("run() returns already-gathered claims/gaps even if the report write fails", async () => {
+    const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }]);
+    servers = [crm];
+    const manager = new McpClientManager(
+      [serverConfig("crm", ["read_deals"])],
+      resolver,
+      guard,
+      { retry: instantRetry, transportFactory: () => crm.transport },
+    );
+    await manager.connectAll();
+
+    const audit = new InMemoryAuditLogger();
+    const orch = new Orchestrator({
+      manager,
+      audit,
+      writeReport: async (_content, _file) => {
+        // Stand in for the real failure: a non-markdown extension makes
+        // FileManager.write()'s format validation reject the report content.
+        throw new Error('file operation failed (format-invalid): not valid Markdown');
+      },
+    });
+
+    const result = await orch.run({
+      goal: "deals report",
+      gather: [{ id: "deals", server: "crm", tool: "read_deals", args: { region: "emea" } }],
+      report: { title: "EMEA Deals", file: "summary.json" },
+    });
+
+    // The gathered data must survive the write failure, not be discarded.
+    expect(result.claims.length).toBeGreaterThan(0);
+    expect(result.reportPath).toBeUndefined();
+    expect(result.reportError).toBeDefined();
+    expect(result.reportError).toMatch(/format-invalid/);
+    // The rendered content is still available to the caller.
+    expect(result.reportContent).toContain("# EMEA Deals");
+    // The failure is audited, not lost.
+    const writeFail = audit
+      .events()
+      .filter((e) => e.type === "orchestrator_task" && e.data["task"] === "report-write");
+    expect(writeFail).toHaveLength(1);
+    expect(writeFail[0]!.data["outcome"]).toBe("error");
+
+    await manager.close();
+    for (const s of servers) await s.close();
+    servers = [];
+  });
 });
