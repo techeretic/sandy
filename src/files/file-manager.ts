@@ -108,13 +108,41 @@ export class FileManager {
     this.policy = options.policy;
     this.audit = options.audit ?? new NullFileAuditSink();
     this.ignorePatterns = compilePatterns(options.policy.ignore_patterns);
-    const reverse: ReverseMutation = (record) => this.reverse(record);
+    // A failed undo must leave an audit trail just like a successful one
+    // (AU-01); the original error (e.g. SandboxViolationError from the
+    // re-checked confinement) is rethrown unchanged.
+    const reverse: ReverseMutation = async (record) => {
+      try {
+        await this.reverse(record);
+      } catch (err) {
+        this.audit.record({
+          op: `undo(${record.op})`,
+          path: record.path,
+          at: new Date().toISOString(),
+          outcome: "error",
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
+    };
     this.journal = options.journal ?? new InMemoryJournal(this.policy.undo_depth, reverse);
   }
 
   /** Undo the last journaled mutation (FM-05). Resolves undefined if none. */
-  undo(): Promise<MutationRecord | undefined> {
-    return this.journal.undo().then((r) => r?.undone);
+  async undo(): Promise<MutationRecord | undefined> {
+    const result = await this.journal.undo();
+    if (!result) return undefined;
+    // Every forward mutation is audited (AU-01); the reversal must be too,
+    // since undo is exactly the operation most likely to need forensic
+    // scrutiny. (A failed reversal is audited by the reverse callback
+    // wrapper in the constructor, where the record is still known.)
+    this.audit.record({
+      op: `undo(${result.undone.op})`,
+      path: result.undone.path,
+      at: new Date().toISOString(),
+      outcome: "ok",
+    });
+    return result.undone;
   }
 
   // --- Reads -----------------------------------------------------------
