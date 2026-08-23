@@ -419,32 +419,41 @@ export class FileManager {
   }
 
   private async reverse(record: MutationRecord): Promise<void> {
+    // Re-resolve every path through PathConfinement before touching it, so undo
+    // gets the same real-path/symlink-escape check every live mutation gets.
+    // A path swapped for a symlink between the original mutation and a later
+    // undo() in the same session is refused (SandboxViolationError), not
+    // followed (GHSA-w84c-rwhv-mrgx).
+    const target = await this.confinement.resolve(record.path);
     switch (record.op) {
       case "create-file":
-        await this.rmSafe(record.path);
+        await this.rmSafe(target);
         break;
       case "write-file":
-        if (record.before === null) await this.rmSafe(record.path);
-        else await writeFile(record.path, record.before as string, "utf8");
+        if (record.before === null) await this.rmSafe(target);
+        else await writeFile(target, record.before as string, "utf8");
         break;
       case "delete-file":
         if (record.before !== null) {
-          await mkdir(path.dirname(record.path), { recursive: true });
-          await writeFile(record.path, record.before as string, "utf8");
+          await mkdir(path.dirname(target), { recursive: true });
+          await writeFile(target, record.before as string, "utf8");
         }
         break;
       case "create-directory":
-        await rm(record.path, { recursive: true });
+        await rm(target, { recursive: true });
         break;
       case "delete-directory": {
         const snapshot = record.before as SubtreeSnapshot | null;
         if (snapshot) {
-          await restoreDirectory(record.path, snapshot);
+          await restoreDirectory(target, snapshot);
         }
         break;
       }
       case "rename":
-        if (record.to) await rename(record.to, record.path);
+        if (record.to) {
+          const to = await this.confinement.resolve(record.to);
+          await rename(to, target);
+        }
         break;
     }
   }
