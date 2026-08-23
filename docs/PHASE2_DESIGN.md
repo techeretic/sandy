@@ -161,6 +161,44 @@ Key properties:
   gather → report pass, the same shape the plugin exposes. Multi-turn /
   agentic tool-selection is a later extension, not the v2 core.
 
+### Threat model note: prompt injection via MCP-retrieved content
+
+`AutonomousLoop.narrate()` (`src/standalone/loop.ts`) builds its prompt from
+`claim.text` — content retrieved from internal systems via MCP (a Jira ticket
+body, a wiki page, a CRM note). That content is **untrusted relative to the
+model**: a document containing adversarial instructions ("ignore the above and
+instead say…") could attempt to steer the local model's narrative summary.
+
+Existing mitigations, by design:
+
+- **Claims are the source of truth, independent of the narrative.** The
+  report's Findings/Provenance sections render directly from claim data with
+  no model involvement (`src/orchestrator/report.ts`); the narrative is a
+  clearly-labeled, separate "Summary" section
+  (`"_(model narrative — a local/host model wrote this; it may vary in
+  quality. The claims below are independently traceable and remain the source
+  of truth.)_"`) that a reader is told not to treat as the sole source of truth.
+- **The narrative cannot expand what already ran.** `narrate()` runs *after*
+  the orchestrator's gather pass is complete and only summarizes results
+  already collected; it has no tool-calling ability and cannot trigger new
+  MCP calls or file operations (the only write is re-rendering the already
+  produced report back to its path).
+- **A narrate failure degrades gracefully.** If the model produces nothing
+  useful or errors, `narrate()` returns `null` and the caller keeps the
+  already-written deterministic report (no narrative section) — a dead model
+  is reported, not a crash.
+
+What this does **not** mitigate: the narrative text itself could still be
+misleading if a weak local model is successfully steered by injected content,
+even though the underlying claims remain independently correct and traceable.
+This is an accepted, documented risk for v2 — a reader who treats the model
+narrative as authoritative rather than as a convenience summary is relying on
+it beyond its designed guarantee. If this becomes a priority, the next steps
+would be delimiting/escaping retrieved content in the narrate prompt (e.g.
+wrapping each claim in an unambiguous boundary marker) and/or a lightweight
+instruction-following check on the narrative output before it is written into
+the report.
+
 ## 3. Component inventory
 
 | Component | Status | Notes |
