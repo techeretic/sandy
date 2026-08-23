@@ -17,6 +17,10 @@ Answers to PRD §13 open questions, captured 2026-08-17.
 | 11 | Default bundled model (Phase 2, design §7 #2) | **Qwen3-4B-Instruct-2507, Q4_K_M GGUF** (~2.4GB, Apache-2.0). | An instruct (chat/agent) model in the 4–8B class; license/size check cleared; proven end-to-end in-sandbox with a real `sandy ask`. |
 | 12 | Model resource-limit scope (Phase 2, §4.5) | **Map caps to real levers; hard ceiling = service-manager cgroup.** `max_cpu_percent` → llama.cpp `--threads` budget (`threadsForCpuPercent`); hard memory bound is the supervisor's cgroup. | CPU cap is a genuine in-service lever (tighten-never-loosen: 100% = no flag, lower = fewer threads); the hard memory ceiling belongs to the process supervisor, so it is documented, not silently unbounded. |
 
+## Accepted limitations
+
+- **Egress allowlist matches by hostname, not by resolved/pinned IP (DNS rebinding).** `sandbox.allowed_network` and the `NetworkGuard` (`src/sandbox/network.ts`) authorize egress by the URL's hostname — they do not pin the IP the name resolved to at check time, so a name whose DNS record changes between the allowlist check and the connection could in principle point elsewhere (the standard DNS-rebinding limitation class for hostname allowlists). This is an **accepted limitation, not an oversight**: it is safe under the admin-controlled, internal-DNS trust model this project assumes — the internal DNS that resolves the declared endpoints is itself controlled and trusted by the operator, so "the declared hostname" and "the endpoint it resolves to" are the same trust boundary. If a deployment ever operates under an untrusted DNS, pin the endpoints to IP literals (or run behind a pinned-identity proxy) rather than relying on hostname matching.
+
 ## Consequences
 
 - Phase 1 build order: config schemas → Sandbox Enforcer (Docker + Firejail) → MCP Client Manager → File Manager → Orchestrator (streaming progress + write-gate design) → Claude Code / Codex plugin (manual install) → MCP server scaffolding tools.
