@@ -3,7 +3,7 @@ import type { McpClientManager } from "../mcp/manager.js";
 import { McpCallError } from "../mcp/types.js";
 import type { AuditLogger } from "../audit/logger.js";
 import { captureTranscript, type Transcript } from "../audit/transcript.js";
-import { renderMarkdownReport } from "./report.js";
+import { renderMarkdownReport, renderReport, reportFormatExtension, type ReportFormat } from "./report.js";
 import type { WriteApprovalGate } from "./write-gate.js";
 
 /**
@@ -99,6 +99,13 @@ export interface OrchestratorOptions {
   concurrency?: number;
   /** Progress sink (Q4). */
   onProgress?: (event: ProgressEvent) => void;
+  /**
+   * The report format to render (issue #14). Drives the default renderer
+   * (`renderReport(format, input)`) and the default report file's extension.
+   * Default "markdown". Overridden by an explicit `renderReport` when that is
+   * supplied (tests / custom renderers).
+   */
+  reportFormat?: ReportFormat;
   /** Renders a report from claims/gaps. Injectable for tests. */
   renderReport?: (input: RenderReportInput) => string;
   /** Writes the rendered report to disk (confined by the File Manager). Returns the path. */
@@ -146,7 +153,8 @@ function extractText(result: unknown): string[] {
  * v1 is read-and-report (RG-*). It fans out gather tasks across servers with
  * bounded concurrency, converts each successful call into provenance-tagged
  * claims, records every failure as an explicit gap, and optionally renders a
- * Markdown report where every statement is traceable to its source call.
+ * report (Markdown by default, HTML via `reportFormat`, issue #14) where every
+ * statement is traceable to its source call.
  */
 export class Orchestrator {
   private readonly manager: McpClientManager;
@@ -155,6 +163,7 @@ export class Orchestrator {
   /** Swappable (see {@link setProgressSink}) so a long-lived host can redirect
    *  per-job progress in-band. */
   private onProgress: (event: ProgressEvent) => void;
+  private readonly reportFormat: ReportFormat;
   private readonly renderReport: (input: RenderReportInput) => string;
   private readonly writeReport: ((content: string, file: string) => Promise<string>) | null;
 
@@ -163,7 +172,10 @@ export class Orchestrator {
     this.audit = options.audit;
     this.concurrency = Math.max(1, options.concurrency ?? 5);
     this.onProgress = options.onProgress ?? (() => {});
-    this.renderReport = options.renderReport ?? renderMarkdownReport;
+    this.reportFormat = options.reportFormat ?? "markdown";
+    // An explicitly injected renderer wins (tests / custom renderers);
+    // otherwise the default renderer is bound to the configured format.
+    this.renderReport = options.renderReport ?? ((input) => renderReport(this.reportFormat, input));
     this.writeReport = options.writeReport ?? null;
   }
 
@@ -239,7 +251,9 @@ export class Orchestrator {
         generatedAt,
         summary: request.report.summary,
       });
-      const file = request.report.file ?? `report-${Date.now()}.md`;
+      // The default filename's extension follows the report format (issue
+      // #14); an explicit `file` in the request is honored as-is.
+      const file = request.report.file ?? `report-${Date.now()}${reportFormatExtension(this.reportFormat)}`;
       this.onProgress({ type: "report-writing", path: file });
       if (this.writeReport) {
         try {

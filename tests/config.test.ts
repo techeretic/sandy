@@ -80,6 +80,46 @@ describe("loadSandyConfig", () => {
     }
   });
 
+  it("narrowed reportFormat: markdown is the default, html is accepted (issue #14)", async () => {
+    const { dir, sandyPath } = await makeFixture(validMain, validManifest);
+    try {
+      const loaded = await loadSandyConfig(sandyPath, env);
+      expect(loaded.reportFormat).toBe("markdown");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+
+    const main = {
+      ...validMain,
+      preferences: { ...validMain.preferences, default_report_format: "html" },
+    };
+    const fixture = await makeFixture(main, validManifest);
+    try {
+      const loaded = await loadSandyConfig(fixture.sandyPath, env);
+      expect(loaded.reportFormat).toBe("html");
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed on an unimplemented default_report_format (docx/xlsx/pdf, issue #14)", async () => {
+    for (const format of ["docx", "xlsx", "pdf"]) {
+      const main = {
+        ...validMain,
+        preferences: { ...validMain.preferences, default_report_format: format },
+      };
+      const { dir, sandyPath } = await makeFixture(main, validManifest);
+      try {
+        const result = await loadSandyConfig(sandyPath, env).catch((e) => e);
+        expect(result).toBeInstanceOf(ConfigError);
+        expect((result as Error).message).toContain(format);
+        expect((result as Error).message).toMatch(/not supported yet/);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
   it("keeps secret refs in the parsed config (no literal values)", async () => {
     const { dir, sandyPath } = await makeFixture(validMain, validManifest);
     try {

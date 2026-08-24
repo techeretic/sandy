@@ -7,7 +7,7 @@ import {
   toOrchestratorRequest,
   type OrchestratorRequestInput,
 } from "../orchestrator/request.js";
-import { renderMarkdownReport } from "../orchestrator/report.js";
+import { renderReport, type ReportFormat } from "../orchestrator/report.js";
 import type { AuditLogger } from "../audit/logger.js";
 import { captureTranscript, type Transcript } from "../audit/transcript.js";
 import type { FileManager } from "../files/file-manager.js";
@@ -51,6 +51,8 @@ export interface AutonomousLoopOptions {
   files: FileManager;
   /** Absolute directory reports are written to. */
   reportDir: string;
+  /** Report format (issue #14). Default "markdown"; must match the orchestrator. */
+  reportFormat?: ReportFormat;
   /** The legal tool catalog (from the manifest's allowed_tools). */
   tools: readonly ToolRef[];
   /** Progress sink (Q4). */
@@ -141,6 +143,7 @@ export class AutonomousLoop {
   private readonly audit: AuditLogger;
   private readonly files: FileManager;
   private readonly reportDir: string;
+  private readonly reportFormat: ReportFormat;
   private readonly tools: readonly ToolRef[];
   /** Swappable (see {@link setProgressSink}) so a service's job worker can
    *  redirect per-job progress in-band. */
@@ -154,6 +157,7 @@ export class AutonomousLoop {
     this.audit = options.audit;
     this.files = options.files;
     this.reportDir = options.reportDir;
+    this.reportFormat = options.reportFormat ?? "markdown";
     this.tools = options.tools;
     this.onProgress = options.onProgress ?? (() => {});
     this.maxAttempts = Math.max(1, options.maxParseAttempts ?? 3);
@@ -416,7 +420,10 @@ export class AutonomousLoop {
       return null;
     }
 
-    const content = renderMarkdownReport({
+    // Re-render in the configured format (issue #14): the narrative fills the
+    // Summary slot, but the format matches what the orchestrator wrote, so the
+    // re-written report is the same kind of file.
+    const content = renderReport(this.reportFormat, {
       goal,
       title,
       claims,

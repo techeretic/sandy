@@ -58,6 +58,7 @@ async function writeConfig(
     llm?: Record<string, unknown>;
     mode?: string;
     maxCpuPercent?: number;
+    preferences?: Record<string, unknown>;
   },
 ): Promise<string> {
   const crm = {
@@ -88,6 +89,7 @@ async function writeConfig(
       audit_payload_logging: false,
       ignore_patterns: [],
     },
+    ...(opts.preferences ? { preferences: opts.preferences } : {}),
   };
   await writeFile(path.join(dir, "mcp-servers.json"), JSON.stringify(manifest, null, 2));
   const cfgPath = path.join(dir, "sandy.json");
@@ -217,6 +219,52 @@ describe("createSandy: composition (CLI/service spine)", () => {
       expect(fileTypes).toContain("session_end");
     } finally {
       await closeAll([sandy]);
+    }
+  });
+
+  it("renders an HTML report when preferences.default_report_format is html (issue #14)", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, {
+      allowedPaths: [ws],
+      preferences: { default_report_format: "html" },
+    });
+    const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }]);
+    inMemServers.push(crm);
+
+    const sandy = await createSandy({
+      sandyPath: cfg,
+      transportFactory: () => crm.transport,
+      detection: pinnedDetection,
+    });
+    try {
+      const result = await sandy.run({
+        goal: "EMEA deals summary",
+        gather: [{ id: "deals", server: "crm", tool: "read_deals", args: { region: "emea" } }],
+        report: { title: "EMEA Deals" },
+      });
+
+      // The default filename takes the format's extension, and the on-disk
+      // content is the HTML view (claims + provenance survive the transform).
+      expect(result.reportPath).toMatch(/\.html$/);
+      const onDisk = await fsRead(result.reportPath!, "utf8");
+      expect(onDisk).toContain("<!DOCTYPE html>");
+      expect(onDisk).toContain("EMEA Deals");
+      expect(onDisk).toContain("Provenance");
+    } finally {
+      await closeAll([sandy]);
+    }
+  });
+
+  it("refuses to start when preferences.default_report_format is unimplemented (fail-closed)", async () => {
+    const ws = await tmpWorkspace();
+    for (const format of ["docx", "xlsx", "pdf"]) {
+      const cfg = await writeConfig(ws, {
+        allowedPaths: [ws],
+        preferences: { default_report_format: format },
+      });
+      await expect(createSandy({ sandyPath: cfg, detection: pinnedDetection })).rejects.toThrow(
+        /default_report_format/,
+      );
     }
   });
 

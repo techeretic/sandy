@@ -8,6 +8,7 @@ import {
   type SandyConfig,
 } from "./schema.js";
 import { endpointMatches } from "../sandbox/network.js";
+import { REPORT_FORMATS, type ReportFormat } from "../orchestrator/report.js";
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -72,6 +73,13 @@ export interface LoadedConfig {
   manifestPath: string;
   /** Absolutized report output directory. */
   reportOutputDir: string;
+  /**
+   * The report format to render (`preferences.default_report_format`, issue
+   * #14), narrowed to the formats the renderer can actually produce. The
+   * loader refuses an unimplemented format fail-closed, so this is always a
+   * format `renderReport` accepts.
+   */
+  reportFormat: ReportFormat;
   resolveSecret: (ref: EnvRef) => string;
 }
 
@@ -114,6 +122,17 @@ export async function loadSandyConfig(
     throw new ConfigError(`invalid sandy config at ${sandyPath}:\n${formatIssues(mainResult.error)}`);
   }
   const config = mainResult.data;
+
+  // Fail closed on an unimplemented report format (issue #14): the schema
+  // accepts markdown|html|docx|xlsx|pdf, but only the first two are rendered.
+  // An unimplemented format is a config error, never a silent Markdown fallback.
+  const requestedFormat = config.preferences?.default_report_format ?? "markdown";
+  if (!(REPORT_FORMATS as readonly string[]).includes(requestedFormat)) {
+    throw new ConfigError(
+      `invalid preferences.default_report_format: "${requestedFormat}" is not supported yet (supported: ${REPORT_FORMATS.join(", ")}). Refusing to start (fail-closed).`,
+    );
+  }
+  const reportFormat = requestedFormat as ReportFormat;
 
   const configDir = path.dirname(path.resolve(sandyPath));
   const manifestPath = path.isAbsolute(config.mcp_servers)
@@ -176,6 +195,7 @@ export async function loadSandyConfig(
     configDir,
     manifestPath,
     reportOutputDir,
+    reportFormat,
     resolveSecret: (ref) => resolver.resolve(ref),
   };
 }
