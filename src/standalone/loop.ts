@@ -3,10 +3,10 @@ import type { LlmEngine } from "../engine.js";
 import type { Orchestrator } from "../orchestrator/orchestrator.js";
 import type { Claim, Gap, OrchestratorRequest, ProgressEvent } from "../orchestrator/orchestrator.js";
 import {
-  orchestratorRequestSchema,
   toOrchestratorRequest,
   type OrchestratorRequestInput,
 } from "../orchestrator/request.js";
+import { validateRequest, type ToolRef } from "../orchestrator/templates.js";
 import { renderReport, type ReportFormat } from "../orchestrator/report.js";
 import type { AuditLogger } from "../audit/logger.js";
 import { captureTranscript, type Transcript } from "../audit/transcript.js";
@@ -37,11 +37,7 @@ import type { FileManager } from "../files/file-manager.js";
  *    fallback / no-narrative path; it never takes down the loop.
  */
 
-/** A (server, tool) pair the plan is allowed to reference. */
-export interface ToolRef {
-  server: string;
-  tool: string;
-}
+export type { ToolRef } from "../orchestrator/templates.js";
 
 export interface AutonomousLoopOptions {
   engine: LlmEngine;
@@ -297,37 +293,17 @@ export class AutonomousLoop {
     }
   }
 
-  /** Validate a raw model plan against the schema AND the legal tool catalog. */
+  /**
+   * Validate a raw model plan against the schema AND the legal tool catalog —
+   * the same shared check every entry point uses (templates, CLI, API; issue
+   * #15), so a plan can never be legal that an ad-hoc request could not be.
+   */
   private validatePlan(
     obj: unknown,
   ): { ok: true; data: OrchestratorRequestInput } | { ok: false; error: string } {
-    const parsed = orchestratorRequestSchema.safeParse(obj);
-    if (!parsed.success) {
-      const issues = parsed.error.issues
-        .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
-        .join("; ");
-      return { ok: false, error: `plan failed validation: ${issues}` };
-    }
-    const legal = new Map<string, string[]>();
-    for (const t of this.tools) {
-      const list = legal.get(t.server) ?? [];
-      list.push(t.tool);
-      legal.set(t.server, list);
-    }
-    for (const task of parsed.data.gather) {
-      const toolsForServer = legal.get(task.server);
-      if (toolsForServer === undefined) {
-        const servers = [...legal.keys()].join(", ") || "none";
-        return { ok: false, error: `unknown server "${task.server}" (legal servers: ${servers})` };
-      }
-      if (!toolsForServer.includes(task.tool)) {
-        return {
-          ok: false,
-          error: `tool "${task.tool}" is not allowed on server "${task.server}" (legal tools: ${toolsForServer.join(", ")})`,
-        };
-      }
-    }
-    return { ok: true, data: parsed.data };
+    const validated = validateRequest(obj, this.tools);
+    if (!validated.ok) return { ok: false, error: `plan failed validation: ${validated.error}` };
+    return { ok: true, data: validated.data };
   }
 
   /**

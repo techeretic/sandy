@@ -26,7 +26,9 @@ export type AuditEventType =
   // record the loop's own decisions (outcome, plan source, narrative).
   | "standalone_parse"
   | "standalone_plan"
-  | "standalone_narrate";
+  | "standalone_narrate"
+  // Recurring templates (issue #15): a run job resolved from a saved request.
+  | "template_run";
 
 export interface AuditEvent {
   /** Monotonic sequence number within the session (1-based). */

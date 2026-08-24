@@ -1,11 +1,15 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Sandy, SandyCheckReport } from "../sandy.js";
+import type {
+  OrchestratorRequest,
+  OrchestratorResult,
+  ProgressEvent,
+} from "../orchestrator/orchestrator.js";
 import {
-  orchestratorRequestSchema,
-  toOrchestratorRequest,
-  type OrchestratorRequestInput,
-} from "../orchestrator/request.js";
-import type { OrchestratorResult, ProgressEvent } from "../orchestrator/orchestrator.js";
+  legalToolCatalog,
+  parseRunBody,
+  TemplateError,
+} from "../orchestrator/templates.js";
 import type { LoopResult } from "./loop.js";
 import { captureTranscript } from "../audit/transcript.js";
 
@@ -22,8 +26,9 @@ import { captureTranscript } from "../audit/transcript.js";
  *    side (egress was already guaranteed by the NetworkGuard).
  *  - **No auth in v2** because it is loopback-only and single-user. A later
  *    need is a config-gated addition, not a default.
- *  - **One definition of a legal request.** `POST /run` bodies are validated by
- *    the same `orchestratorRequestSchema` the CLI and plugin use.
+ *  - **One definition of a legal request.** `POST /run` bodies (a raw request
+ *    or `{ "template": "<name>" }`, issue #15) are validated by the same
+ *    `orchestratorRequestSchema` + legal tool catalog the CLI and plugin use.
  *
  * The job store is **bounded** (design §5): a fixed max pending + a bounded
  * completed retention (keep the most recent N, evict oldest), so a long-lived
@@ -66,6 +71,8 @@ export interface Job {
   finishedAt?: number;
   /** The (validated) request that produced the job. */
   input: unknown;
+  /** The template name, when the job was run from a saved request (issue #15). */
+  template?: string;
   /** The result, once done (OrchestratorResult or LoopResult). */
   result?: OrchestratorResult | LoopResult;
   /** The error, when status is "error". */
@@ -95,7 +102,7 @@ export class BoundedJobStore {
     return this.jobs.size;
   }
 
-  create(kind: JobKind, input: unknown): Job {
+  create(kind: JobKind, input: unknown, template?: string): Job {
     this.seq += 1;
     const job: Job = {
       id: `job-${this.seq}`,
@@ -103,6 +110,7 @@ export class BoundedJobStore {
       status: "queued",
       createdAt: Date.now(),
       input,
+      ...(template !== undefined ? { template } : {}),
       progress: [],
       sse: new Set(),
     };
@@ -246,31 +254,49 @@ export class LocalApi {
     if (this.store.pendingCount() >= this.maxPending) {
       throw new ApiError(429, "too many pending jobs; try again shortly");
     }
-    const input = this.validate(kind, body);
-    const job = this.store.create(kind, input);
+    const validated = this.validate(kind, body);
+    const input = validated.kind === "run" ? validated.request : { goal: validated.goal };
+    const template = validated.kind === "run" ? validated.template : undefined;
+    const job = this.store.create(kind, input, template);
     // A job just appeared: wake a parked worker immediately instead of waiting
     // for its next poll tick (event-driven, no busy-poll).
     this.wakeWorker();
+    // A template run is a distinct audited fact (AU-01, issue #15): a saved
+    // request was re-run, and the job it produced.
+    if (template !== undefined) {
+      this.sandy.audit.append("template_run", { template, job: job.id });
+    }
     return job;
   }
 
-  private validate(kind: JobKind, body: unknown): unknown {
+  /**
+   * Validate a job body. `run` accepts a raw request OR a template reference
+   * (`{ "template": "<name>" }`, issue #15) — both through the same
+   * `orchestratorRequestSchema` + legal tool catalog the CLI and plugin use
+   * (nothing new is legal because it is "saved").
+   */
+  private validate(
+    kind: JobKind,
+    body: unknown,
+  ): { kind: "run"; request: OrchestratorRequest; template?: string } | { kind: "ask"; goal: string } {
     if (kind === "run") {
-      const parsed = orchestratorRequestSchema.safeParse(body ?? {});
-      if (!parsed.success) {
-        const issues = parsed.error.issues
-          .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
-          .join("; ");
-        throw new ApiError(400, `invalid orchestrator request: ${issues}`);
+      try {
+        const { request, template } = parseRunBody(
+          body,
+          this.sandy.loaded.templates,
+          legalToolCatalog(this.sandy.loaded.manifest),
+        );
+        return template !== undefined ? { kind: "run", request, template } : { kind: "run", request };
+      } catch (err) {
+        throw new ApiError(400, err instanceof Error ? err.message : String(err));
       }
-      return toOrchestratorRequest(parsed.data);
     }
     // kind === "ask"
     const goal = (body as { goal?: unknown } | null)?.goal;
     if (typeof goal !== "string" || goal.trim().length === 0) {
       throw new ApiError(400, "invalid ask body: { \"goal\": \"<non-empty string>\" } is required");
     }
-    return { goal: goal.trim() };
+    return { kind: "ask", goal: goal.trim() };
   }
 
   getHealth(): SandyCheckReport {
@@ -317,7 +343,7 @@ export class LocalApi {
       try {
         const result =
           job.kind === "run"
-            ? await this.sandy.run(job.input as ReturnType<typeof toOrchestratorRequest>)
+            ? await this.sandy.run(job.input as OrchestratorRequest)
             : await this.sandy.ask((job.input as { goal: string }).goal);
         job.result = result;
         job.status = "done";
@@ -462,6 +488,7 @@ function jobResponse(job: Job): Record<string, unknown> {
     createdAt: job.createdAt,
     ...(job.startedAt !== undefined ? { startedAt: job.startedAt } : {}),
     ...(job.finishedAt !== undefined ? { finishedAt: job.finishedAt } : {}),
+    ...(job.template !== undefined ? { template: job.template } : {}),
     progress: job.progress,
     ...(job.result !== undefined ? { result: job.result } : {}),
     ...(job.error !== undefined ? { error: job.error } : {}),

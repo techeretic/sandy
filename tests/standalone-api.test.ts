@@ -39,7 +39,11 @@ async function tmpWorkspace(): Promise<string> {
   return dir;
 }
 
-async function writeConfig(dir: string, allowedPaths: string[]): Promise<string> {
+async function writeConfig(
+  dir: string,
+  allowedPaths: string[],
+  templates?: Record<string, unknown>,
+): Promise<string> {
   const crm = {
     name: "crm",
     transport: "stdio",
@@ -68,8 +72,12 @@ async function writeConfig(dir: string, allowedPaths: string[]): Promise<string>
       audit_payload_logging: false,
       ignore_patterns: [],
     },
+    ...(templates ? { templates: { path: "./templates.json" } } : {}),
   };
   await writeFile(path.join(dir, "mcp-servers.json"), JSON.stringify(manifest, null, 2));
+  if (templates) {
+    await writeFile(path.join(dir, "templates.json"), JSON.stringify(templates, null, 2));
+  }
   const cfgPath = path.join(dir, "sandy.json");
   await writeFile(cfgPath, JSON.stringify(main, null, 2));
   return cfgPath;
@@ -132,10 +140,10 @@ class ScriptedEngine implements LlmEngine {
 }
 
 async function makeApi(
-  opts: { engine?: LlmEngine; api?: LocalApiOptions } = {},
+  opts: { engine?: LlmEngine; api?: LocalApiOptions; templates?: Record<string, unknown> } = {},
 ): Promise<{ api: LocalApi; sandy: Sandy; ws: string; base: string; engine: ScriptedEngine }> {
   const ws = await tmpWorkspace();
-  const cfg = await writeConfig(ws, [ws]);
+  const cfg = await writeConfig(ws, [ws], opts.templates);
   const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }]);
   inMemServers.push(crm);
   const engine = (opts.engine ?? new ScriptedEngine(new InMemoryAuditLogger())) as ScriptedEngine;
@@ -230,6 +238,60 @@ describe("LocalApi (Phase 2, design §5)", () => {
     const { status, body } = await postRun(base, { goal: "x", gather: [] });
     expect(status).toBe(400);
     expect(body.error).toMatch(/gather/);
+  });
+
+  it("POST /run {template} → 202 → runs the saved request (issue #15)", async () => {
+    const { api, base, ws } = await makeApi({
+      templates: {
+        "deals-emea": LEGAL_RUN,
+      },
+    });
+    const { status, body } = await postRun(base, { template: "deals-emea" });
+    expect(status).toBe(202);
+    expect(body.id).toBeTruthy();
+    const job = await waitForJob(api, body.id!, "done");
+    expect(job.template).toBe("deals-emea");
+    const result = job.result as { claims: Array<{ text: string }>; reportPath?: string };
+    expect(result.claims).toHaveLength(1);
+    expect(result.reportPath).toBe(path.join(ws, "reports", "deals.md"));
+
+    const get = await fetch(`${base}/jobs/${body.id}`);
+    const got = (await get.json()) as { status: string; template?: string };
+    expect(got.status).toBe("done");
+    expect(got.template).toBe("deals-emea");
+  });
+
+  it("POST /run with an unknown template → 400 naming it", async () => {
+    const { base } = await makeApi({ templates: { other: LEGAL_RUN } });
+    const { status, body } = await postRun(base, { template: "deals-emea" });
+    expect(status).toBe(400);
+    expect(body.error).toContain("deals-emea");
+    expect(body.error).toContain("other");
+  });
+
+  it("POST /run {template} with no registry configured → 400 (fail-closed)", async () => {
+    const { base } = await makeApi();
+    const { status, body } = await postRun(base, { template: "deals-emea" });
+    expect(status).toBe(400);
+    expect(body.error).toMatch(/no template registry is configured/);
+  });
+
+  it("POST /run with a non-string template → 400", async () => {
+    const { base } = await makeApi({ templates: { deals: LEGAL_RUN } });
+    const { status, body } = await postRun(base, { template: 42 });
+    expect(status).toBe(400);
+    expect(body.error).toMatch(/template/);
+  });
+
+  it("POST /run template bodies are audited (template_run) with the job id", async () => {
+    const { api, base, sandy } = await makeApi({ templates: { "deals-emea": LEGAL_RUN } });
+    const { body } = await postRun(base, { template: "deals-emea" });
+    await waitForJob(api, body.id!, "done");
+    const events = sandy.audit.events();
+    const templateRun = events.find((e) => e.type === "template_run");
+    expect(templateRun).toBeDefined();
+    expect((templateRun!.data as Record<string, unknown>).template).toBe("deals-emea");
+    expect((templateRun!.data as Record<string, unknown>).job).toBe(body.id);
   });
 
   it("GET /jobs/:id on an unknown id → clean 404 (never a crash)", async () => {

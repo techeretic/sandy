@@ -1,0 +1,16 @@
+{
+  "deals-emea": {
+    "goal": "Summarize the EMEA deals currently in the CRM",
+    "gather": [
+      { "id": "deals", "server": "crm", "tool": "read_deals", "args": { "region": "emea" } }
+    ],
+    "report": { "title": "EMEA Deals", "file": "deals-emea.md" }
+  },
+  "sprint-health": {
+    "goal": "Report the health of the current sprint in Jira",
+    "gather": [
+      { "id": "sprints", "server": "jira", "tool": "read_sprints", "args": {} }
+    ],
+    "report": { "title": "Sprint Health", "file": "sprint-health.md" }
+  }
+}

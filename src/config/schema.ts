@@ -249,6 +249,19 @@ const preferencesSchema = z
   .strict()
   .optional();
 
+/**
+ * The optional template registry (issue #15 / RG-08): a named sidecar file of
+ * saved requests, the same shape `sandy run <request.json>` / `POST /run`
+ * take. When absent, no templates are available (the CLI falls back to
+ * treating the argument as a request file).
+ */
+export const templatesConfigSchema = z
+  .object({
+    path: z.string().min(1).describe("Path to the template registry (templates.json)"),
+  })
+  .strict()
+  .optional();
+
 export const sandyConfigSchema = z
   .object({
     mode: z.enum(["plugin", "standalone"]),
@@ -261,6 +274,7 @@ export const sandyConfigSchema = z
     report_output_dir: z.string().min(1),
     policy: policySchema,
     preferences: preferencesSchema,
+    templates: templatesConfigSchema,
   })
   .strict();
 

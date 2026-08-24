@@ -58,11 +58,15 @@ const validManifest = {
 async function makeFixture(
   main: object,
   manifest: object,
+  templates?: object,
 ): Promise<{ dir: string; sandyPath: string }> {
   const dir = await mkdtemp(path.join(tmpdir(), "sandy-"));
   const sandyPath = path.join(dir, "sandy.json");
   await writeFile(sandyPath, JSON.stringify(main, null, 2));
   await writeFile(path.join(dir, "mcp-servers.json"), JSON.stringify(manifest, null, 2));
+  if (templates !== undefined) {
+    await writeFile(path.join(dir, "templates.json"), JSON.stringify(templates, null, 2));
+  }
   return { dir, sandyPath };
 }
 
@@ -349,6 +353,144 @@ describe("loadSandyConfig", () => {
       const result = await loadSandyConfig(sandyPath, env).catch((e) => e);
       expect(result).toBeInstanceOf(ConfigError);
       expect((result as Error).message).toContain("mcp-servers.json");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// --- template registry (issue #15 / RG-08) -----------------------------------
+
+describe("loadSandyConfig: template registry (issue #15)", () => {
+  const validTemplates = {
+    "deals-emea": {
+      goal: "EMEA deals",
+      gather: [{ id: "deals", server: "crm", tool: "read_deals", args: { region: "emea" } }],
+      report: { title: "EMEA Deals", file: "deals-emea.md" },
+    },
+  };
+
+  it("no templates.path → loaded.templates is undefined", async () => {
+    const { dir, sandyPath } = await makeFixture(validMain, validManifest);
+    try {
+      const loaded = await loadSandyConfig(sandyPath, env);
+      expect(loaded.templates).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("loads a valid templates.path registry (relative to the config dir)", async () => {
+    const main = { ...validMain, templates: { path: "./templates.json" } };
+    const { dir, sandyPath } = await makeFixture(main, validManifest, validTemplates);
+    try {
+      const loaded = await loadSandyConfig(sandyPath, env);
+      expect(loaded.templates).toEqual(validTemplates);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when the templates file is missing", async () => {
+    const main = { ...validMain, templates: { path: "./templates.json" } };
+    const { dir, sandyPath } = await makeFixture(main, validManifest);
+    try {
+      const result = await loadSandyConfig(sandyPath, env).catch((e) => e);
+      expect(result).toBeInstanceOf(ConfigError);
+      expect((result as Error).message).toContain("templates.json");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when the templates file is not valid JSON", async () => {
+    const main = { ...validMain, templates: { path: "./templates.json" } };
+    const dir = await mkdtemp(path.join(tmpdir(), "sandy-"));
+    const sandyPath = path.join(dir, "sandy.json");
+    await writeFile(sandyPath, JSON.stringify(main, null, 2));
+    await writeFile(path.join(dir, "mcp-servers.json"), JSON.stringify(validManifest, null, 2));
+    await writeFile(path.join(dir, "templates.json"), "{ not json");
+    try {
+      const result = await loadSandyConfig(sandyPath, env).catch((e) => e);
+      expect(result).toBeInstanceOf(ConfigError);
+      expect((result as Error).message).toMatch(/not valid JSON/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when a template entry is not a legal request (schema)", async () => {
+    const main = { ...validMain, templates: { path: "./templates.json" } };
+    const { dir, sandyPath } = await makeFixture(
+      main,
+      validManifest,
+      { broken: { goal: "x", gather: [] } },
+    );
+    try {
+      const result = await loadSandyConfig(sandyPath, env).catch((e) => e);
+      expect(result).toBeInstanceOf(ConfigError);
+      expect((result as Error).message).toContain("gather");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when a template name is not kebab-case", async () => {
+    const main = { ...validMain, templates: { path: "./templates.json" } };
+    const { dir, sandyPath } = await makeFixture(
+      main,
+      validManifest,
+      { "Bad Name": { goal: "x", gather: [{ id: "a", server: "crm", tool: "read_deals" }] } },
+    );
+    try {
+      const result = await loadSandyConfig(sandyPath, env).catch((e) => e);
+      expect(result).toBeInstanceOf(ConfigError);
+      expect((result as Error).message).toMatch(/kebab-case/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when a template references an unknown server", async () => {
+    const main = { ...validMain, templates: { path: "./templates.json" } };
+    const { dir, sandyPath } = await makeFixture(
+      main,
+      validManifest,
+      {
+        rogue: {
+          goal: "x",
+          gather: [{ id: "h", server: "hr", tool: "read_pii" }],
+        },
+      },
+    );
+    try {
+      const result = await loadSandyConfig(sandyPath, env).catch((e) => e);
+      expect(result).toBeInstanceOf(ConfigError);
+      expect((result as Error).message).toContain("unknown server");
+      expect((result as Error).message).toContain("hr");
+      expect((result as Error).message).toMatch(/fail-closed/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when a template references a tool not in allowed_tools", async () => {
+    const main = { ...validMain, templates: { path: "./templates.json" } };
+    const { dir, sandyPath } = await makeFixture(
+      main,
+      validManifest,
+      {
+        rogue: {
+          goal: "x",
+          gather: [{ id: "d", server: "crm", tool: "delete_all" }],
+        },
+      },
+    );
+    try {
+      const result = await loadSandyConfig(sandyPath, env).catch((e) => e);
+      expect(result).toBeInstanceOf(ConfigError);
+      expect((result as Error).message).toContain("delete_all");
+      expect((result as Error).message).toMatch(/not allowed on server/);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
