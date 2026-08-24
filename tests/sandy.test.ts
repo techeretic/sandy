@@ -13,6 +13,8 @@ import {
   EXIT,
   InMemoryAuditLogger,
   NetworkGuard,
+  PolicyApprovalGate,
+  ReadOnlyGate,
   type LlmConfig,
   type LlmEngine,
   type Sandy,
@@ -61,15 +63,20 @@ async function writeConfig(
     preferences?: Record<string, unknown>;
     /** A template registry (issue #15), written to templates.json + wired in. */
     templates?: Record<string, unknown>;
+    /** Tools the in-memory `crm` server exposes (default: read_deals). */
+    crmTools?: string[];
+    /** The admin write allowlist (issue #16 / Q6). */
+    writeAllowlist?: Array<{ server: string; tool: string }>;
   },
 ): Promise<string> {
+  const crmTools = opts.crmTools ?? ["read_deals"];
   const crm = {
     name: "crm",
     transport: "stdio",
     command: opts.crmCommand ?? ["true"],
     version: "1.0.0",
-    capabilities: ["read_deals"],
-    allowed_tools: ["read_deals"],
+    capabilities: crmTools,
+    allowed_tools: crmTools,
   };
   const manifest = { servers: [crm, ...(opts.extraServers ?? [])] };
   const main = {
@@ -93,6 +100,7 @@ async function writeConfig(
     },
     ...(opts.preferences ? { preferences: opts.preferences } : {}),
     ...(opts.templates ? { templates: { path: "./templates.json" } } : {}),
+    ...(opts.writeAllowlist !== undefined ? { write_allowlist: opts.writeAllowlist } : {}),
   };
   await writeFile(path.join(dir, "mcp-servers.json"), JSON.stringify(manifest, null, 2));
   if (opts.templates) {
@@ -302,6 +310,70 @@ describe("createSandy: composition (CLI/service spine)", () => {
       });
       expect(result.claims).toEqual([]);
       expect(result.gaps[0]?.reason).toBe("server-unavailable");
+    } finally {
+      await closeAll([sandy]);
+    }
+  });
+});
+
+describe("createSandy: write-back (issue #16 / Q6)", () => {
+  it("defaults to read-only: no write_allowlist → ReadOnlyGate, check() reports disabled", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, { allowedPaths: [ws], crmTools: ["read_deals", "write_deal"] });
+    const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }, { name: "write_deal" }]);
+    inMemServers.push(crm);
+
+    const sandy = await createSandy({
+      sandyPath: cfg,
+      transportFactory: () => crm.transport,
+      detection: pinnedDetection,
+    });
+    try {
+      expect(sandy.check().write).toEqual({ enabled: false, allowlist: [] });
+      expect(sandy.writeGate).toBeInstanceOf(ReadOnlyGate);
+      const results = await sandy.write([
+        { id: "w1", server: "crm", tool: "write_deal", args: {} },
+      ]);
+      expect(results[0]).toMatchObject({ allowed: false, reason: "gate-refused" });
+      expect(crm.calls.get("write_deal")).toBeUndefined();
+    } finally {
+      await closeAll([sandy]);
+    }
+  });
+
+  it("configures a PolicyApprovalGate from write_allowlist and executes an approved write", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, {
+      allowedPaths: [ws],
+      crmTools: ["read_deals", "write_deal"],
+      writeAllowlist: [{ server: "crm", tool: "write_deal" }],
+    });
+    const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }, { name: "write_deal" }]);
+    inMemServers.push(crm);
+
+    const sandy = await createSandy({
+      sandyPath: cfg,
+      transportFactory: () => crm.transport,
+      detection: pinnedDetection,
+    });
+    try {
+      expect(sandy.check().write).toEqual({
+        enabled: true,
+        allowlist: [{ server: "crm", tool: "write_deal" }],
+      });
+      expect(sandy.writeGate).toBeInstanceOf(PolicyApprovalGate);
+
+      const approval = { taskId: "w1", approver: "alice", reason: "user confirmed" };
+      const results = await sandy.write(
+        [{ id: "w1", server: "crm", tool: "write_deal", args: { region: "emea" } }],
+        { w1: approval },
+      );
+      expect(results[0]).toMatchObject({ task: "w1", allowed: true });
+      expect(crm.calls.get("write_deal")).toBe(1);
+      expect(crm.lastArgs.get("write_deal")).toEqual({ region: "emea" });
+
+      const writeEvents = sandy.audit.events().filter((e) => e.type === "write_attempt");
+      expect(writeEvents[0]?.data).toMatchObject({ allowed: true, approver: "alice" });
     } finally {
       await closeAll([sandy]);
     }

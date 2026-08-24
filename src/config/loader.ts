@@ -10,6 +10,7 @@ import {
 import { endpointMatches } from "../sandbox/network.js";
 import { REPORT_FORMATS, type ReportFormat } from "../orchestrator/report.js";
 import { loadTemplateRegistry, type TemplateRegistry } from "../orchestrator/templates.js";
+import type { WriteAllowlistEntry } from "../orchestrator/write-gate.js";
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -87,6 +88,14 @@ export interface LoadedConfig {
    * so this is always a well-formed set of named saved requests.
    */
   templates?: TemplateRegistry;
+  /**
+   * The effective admin write allowlist (issue #16 / Q6): the (server, tool)
+   * pairs a write-back may target. The loader fails closed on an entry that
+   * names an unknown server or a tool not in the server's `allowed_tools`, so
+   * this is always a subset of the read allowlist. Absent when
+   * `write_allowlist` is not configured (no write-back available).
+   */
+  writeAllowlist?: WriteAllowlistEntry[];
   resolveSecret: (ref: EnvRef) => string;
 }
 
@@ -212,6 +221,31 @@ export async function loadSandyConfig(
     }
   }
 
+  // Admin write allowlist (issue #16 / Q6, CP-02): cross-check every entry
+  // against the manifest and fail closed. The write allowlist is separate
+  // from, and STRICTER than, the read allowlist — an entry naming an unknown
+  // server or a tool that is not in that server's `allowed_tools` is refused
+  // at config load, so the write allowlist can never be wider than the read
+  // allowlist (policy > preferences).
+  let writeAllowlist: WriteAllowlistEntry[] | undefined;
+  if (config.write_allowlist !== undefined) {
+    writeAllowlist = [];
+    for (const entry of config.write_allowlist) {
+      const server = manifest.servers.find((s) => s.name === entry.server);
+      if (!server) {
+        throw new ConfigError(
+          `write_allowlist references unknown server "${entry.server}" (legal servers: ${manifest.servers.map((s) => s.name).join(", ")}). Refusing to start (fail-closed).`,
+        );
+      }
+      if (!server.allowed_tools.includes(entry.tool)) {
+        throw new ConfigError(
+          `write_allowlist references tool "${entry.tool}", which is not allowed on server "${entry.server}" (allowed tools: ${server.allowed_tools.join(", ")}). The write allowlist must be a subset of the read allowlist (CP-02). Refusing to start (fail-closed).`,
+        );
+      }
+      writeAllowlist.push({ server: entry.server, tool: entry.tool });
+    }
+  }
+
   const collector: EnvRefCollector = { refs: new Set(), visit: (v) => collectEnvRefs(v, collector) };
   collector.visit(config);
   collector.visit(manifest);
@@ -236,6 +270,7 @@ export async function loadSandyConfig(
     reportOutputDir,
     reportFormat,
     ...(templates !== undefined ? { templates } : {}),
+    ...(writeAllowlist !== undefined ? { writeAllowlist } : {}),
     resolveSecret: (ref) => resolver.resolve(ref),
   };
 }

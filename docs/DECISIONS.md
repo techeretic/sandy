@@ -9,7 +9,7 @@ Answers to PRD §13 open questions, captured 2026-08-17.
 | 3 | Plugin distribution | **Git repo + manual install** for v1. | Platform teams control rollout; no registry dependency in locked-down environments. Revisit marketplace later. |
 | 4 | Streaming responses | **Yes — stream progress in v1.** | Better UX for slow multi-source queries; report artifacts remain batch outputs. |
 | 5 | Multi-user support | **One instance per user.** | Avoids shared-state auth/audit complexity in v1; per-user config already exists (CP-01). |
-| 6 | Write-back to internal systems | **Defer implementation; design the approval-gate architecture now.** | Keep v1 read-and-report (PRD non-goal) but shape the Orchestrator/MCP allowlist so a write path can be added behind an approval gate without rework. |
+| 6 | Write-back to internal systems | **Defer implementation; design the approval-gate architecture now. (Core now implemented — issue #16.)** | Keep v1 read-and-report (PRD non-goal) but shape the Orchestrator/MCP allowlist so a write path can be added behind an approval gate without rework. Delivered: an admin `write_allowlist` (config, always a subset of the read allowlist — CP-02), a `PolicyApprovalGate` (allowlist + single-use, per-write, audited approval), `Orchestrator.write()`, and the `sandy.write` plugin tool. Default stays fail-closed: no `write_allowlist` → `ReadOnlyGate` refuses every write. |
 | 7 | MCP server versioning | **Pin exact versions in `mcp-servers.json`; updates are config changes reviewed in VCS.** | Fits the admin-controlled, read-only-at-runtime registry (MCP-06) and locked-down deployments. |
 | 8 | Long-running tasks | **Session-scoped only in v1.** | Re-runnable report templates (RG-08, Phase 2) cover the recurring case; no persistence/resumption in v1. |
 | 9 | MCP server authoring | **Include scaffolding tools.** | Lets platform teams wrap internal services as MCP servers; ships alongside the config schemas, not in the model's runtime path. |
@@ -26,4 +26,4 @@ Answers to PRD §13 open questions, captured 2026-08-17.
 - Phase 1 build order: config schemas → Sandbox Enforcer (Docker + Firejail) → MCP Client Manager → File Manager → Orchestrator (streaming progress + write-gate design) → Claude Code / Codex plugin (manual install) → MCP server scaffolding tools.
 - `mcp-servers.json` must carry an explicit `version`/pin field per server (Q7).
 - Progress streaming is a P1 UX requirement for the plugin interface (Q4).
-- The write-approval gate is a design-time deliverable for v1, not a runtime feature (Q6).
+- The write-approval gate was a design-time deliverable for v1 (Q6); its core (allowlist + `PolicyApprovalGate` + `sandy.write`) is now implemented (issue #16), defaulting to the read-only `ReadOnlyGate` — fail closed, never auto-confirm.

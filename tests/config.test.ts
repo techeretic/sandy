@@ -496,3 +496,79 @@ describe("loadSandyConfig: template registry (issue #15)", () => {
     }
   });
 });
+
+describe("loadSandyConfig: write allowlist (issue #16 / Q6)", () => {
+  it("no write_allowlist → loaded.writeAllowlist is undefined (read-only default)", async () => {
+    const { dir, sandyPath } = await makeFixture(validMain, validManifest);
+    try {
+      const loaded = await loadSandyConfig(sandyPath, env);
+      expect(loaded.writeAllowlist).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("loads a valid write_allowlist (subset of the read allowlist)", async () => {
+    const main = {
+      ...validMain,
+      write_allowlist: [{ server: "crm", tool: "read_contacts" }],
+    };
+    const { dir, sandyPath } = await makeFixture(main, validManifest);
+    try {
+      const loaded = await loadSandyConfig(sandyPath, env);
+      expect(loaded.writeAllowlist).toEqual([{ server: "crm", tool: "read_contacts" }]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when a write_allowlist entry names an unknown server", async () => {
+    const main = {
+      ...validMain,
+      write_allowlist: [{ server: "erp", tool: "post_invoice" }],
+    };
+    const { dir, sandyPath } = await makeFixture(main, validManifest);
+    try {
+      const result = await loadSandyConfig(sandyPath, env).catch((e) => e);
+      expect(result).toBeInstanceOf(ConfigError);
+      expect((result as Error).message).toContain("unknown server");
+      expect((result as Error).message).toContain("erp");
+      expect((result as Error).message).toMatch(/fail-closed/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when a write_allowlist tool is not in the server's allowed_tools (CP-02)", async () => {
+    // crm allows read_deals/read_contacts; write_all is not on the read allowlist.
+    const main = {
+      ...validMain,
+      write_allowlist: [{ server: "crm", tool: "write_all" }],
+    };
+    const { dir, sandyPath } = await makeFixture(main, validManifest);
+    try {
+      const result = await loadSandyConfig(sandyPath, env).catch((e) => e);
+      expect(result).toBeInstanceOf(ConfigError);
+      expect((result as Error).message).toContain("write_all");
+      expect((result as Error).message).toMatch(/subset of the read allowlist/);
+      expect((result as Error).message).toMatch(/CP-02/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a malformed write_allowlist entry (strict schema)", async () => {
+    const main = {
+      ...validMain,
+      write_allowlist: [{ server: "crm", tool: "read_deals", extra: true }],
+    };
+    const { dir, sandyPath } = await makeFixture(main, validManifest);
+    try {
+      const result = await loadSandyConfig(sandyPath, env).catch((e) => e);
+      expect(result).toBeInstanceOf(ConfigError);
+      expect((result as Error).message).toContain("write_allowlist");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

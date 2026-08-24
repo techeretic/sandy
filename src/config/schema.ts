@@ -250,6 +250,27 @@ const preferencesSchema = z
   .optional();
 
 /**
+ * The admin write allowlist (issue #16 / Q6): the (server, tool) pairs a
+ * write-back may target. Separate from, and STRICTER than, the read
+ * allowlist (the manifest's `allowed_tools`) — CP-02: policy > preferences.
+ * The loader cross-checks every entry against the manifest and fails closed
+ * on an entry that names an unknown server or a non-allowed tool, so the
+ * write allowlist can never be wider than the read allowlist. When absent
+ * (or empty), no write is possible: the default gate refuses all writes.
+ */
+export const writeAllowlistEntrySchema = z
+  .object({
+    server: z.string().min(1).describe("MCP server name (must exist in the manifest)"),
+    tool: z
+      .string()
+      .min(1)
+      .describe("Tool name (must be in the server's allowed_tools)"),
+  })
+  .strict();
+
+export type WriteAllowlistEntry = z.infer<typeof writeAllowlistEntrySchema>;
+
+/**
  * The optional template registry (issue #15 / RG-08): a named sidecar file of
  * saved requests, the same shape `sandy run <request.json>` / `POST /run`
  * take. When absent, no templates are available (the CLI falls back to
@@ -275,6 +296,11 @@ export const sandyConfigSchema = z
     policy: policySchema,
     preferences: preferencesSchema,
     templates: templatesConfigSchema,
+    /**
+     * The admin write allowlist (issue #16 / Q6). Optional; when absent,
+     * write-back is unavailable (the default gate refuses all writes).
+     */
+    write_allowlist: z.array(writeAllowlistEntrySchema).optional(),
   })
   .strict();
 

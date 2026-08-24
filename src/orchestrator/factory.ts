@@ -7,6 +7,7 @@ import {
   Orchestrator,
   type OrchestratorOptions,
 } from "./orchestrator.js";
+import type { WriteApprovalGate } from "./write-gate.js";
 
 export interface OrchestratorFactoryOptions {
   manager: McpClientManager;
@@ -19,6 +20,11 @@ export interface OrchestratorFactoryOptions {
   reportFormat?: ReportFormat;
   concurrency?: number;
   onProgress?: OrchestratorOptions["onProgress"];
+  /**
+   * The write-approval gate (issue #16 / Q6). Defaults to the ReadOnlyGate
+   * inside the Orchestrator when omitted (refuse all writes, fail closed).
+   */
+  writeGate?: WriteApprovalGate;
 }
 
 /**
@@ -27,13 +33,14 @@ export interface OrchestratorFactoryOptions {
  * report writer (RG-02/RG-03).
  */
 export function createOrchestrator(options: OrchestratorFactoryOptions): Orchestrator {
-  const { manager, audit, files, reportDir, reportFormat, concurrency, onProgress } = options;
+  const { manager, audit, files, reportDir, reportFormat, concurrency, onProgress, writeGate } = options;
   return new Orchestrator({
     manager,
     audit,
     concurrency,
     onProgress,
     reportFormat,
+    writeGate,
     writeReport: async (content, file) => {
       const target = path.join(reportDir, file);
       // The File Manager confines the path and applies policy; report writes

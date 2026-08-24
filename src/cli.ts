@@ -194,6 +194,18 @@ function progressSink(enabled: boolean): (e: ProgressEvent) => void {
       case "report-writing":
         w(`\u270e writing report \u2192 ${e.path}`);
         break;
+      case "write-approved":
+        w(`\u270e write ${e.task} \u2192 ${e.server}/${e.tool} approved by ${e.approver}`);
+        break;
+      case "write-denied":
+        w(`\u2717 write ${e.task} denied: ${e.reason}`);
+        break;
+      case "write-succeeded":
+        w(`\u2713 write ${e.task} (${e.durationMs}ms)`);
+        break;
+      case "write-failed":
+        w(`\u2717 write ${e.task}: ${e.error}`);
+        break;
       case "done":
         w(`\u2022 done: ${e.claims} claim(s), ${e.gaps} gap(s)`);
         break;

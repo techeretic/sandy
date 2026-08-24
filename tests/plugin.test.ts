@@ -38,7 +38,12 @@ async function tmpWorkspace(): Promise<string> {
   return dir;
 }
 
-async function writeConfig(dir: string, allowedPaths: string[]): Promise<string> {
+async function writeConfig(
+  dir: string,
+  allowedPaths: string[],
+  tools: string[] = ["read_deals"],
+  writeAllowlist?: Array<{ server: string; tool: string }>,
+): Promise<string> {
   const manifest = {
     servers: [
       {
@@ -46,8 +51,8 @@ async function writeConfig(dir: string, allowedPaths: string[]): Promise<string>
         transport: "stdio",
         command: ["true"],
         version: "1.0.0",
-        capabilities: ["read_deals"],
-        allowed_tools: ["read_deals"],
+        capabilities: tools,
+        allowed_tools: tools,
       },
     ],
   };
@@ -70,6 +75,7 @@ async function writeConfig(dir: string, allowedPaths: string[]): Promise<string>
       audit_payload_logging: false,
       ignore_patterns: [],
     },
+    ...(writeAllowlist !== undefined ? { write_allowlist: writeAllowlist } : {}),
   };
   await writeFile(path.join(dir, "mcp-servers.json"), JSON.stringify(manifest, null, 2));
   const cfgPath = path.join(dir, "sandy.json");
@@ -81,8 +87,9 @@ async function writeConfig(dir: string, allowedPaths: string[]): Promise<string>
 async function makeSession(
   cfgPath: string,
   extra: SandyPluginOptions = {},
-): Promise<{ api: SandyPluginAPI; session: PluginSession; close: () => Promise<void> }> {
-  const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }]);
+  tools: string[] = ["read_deals"],
+): Promise<{ api: SandyPluginAPI; session: PluginSession; crm: TestServer; close: () => Promise<void> }> {
+  const crm = await makeInMemoryServer("crm", tools.map((name) => ({ name })));
   inMem.push(crm);
   // Pin the *detected* sandbox runtime so status/ok are host-independent (a
   // bare host reports "none" and a custom-declared boundary would be reported
@@ -97,6 +104,7 @@ async function makeSession(
   return {
     api,
     session,
+    crm,
     close: async () => {
       await cache.closeAll();
       await crm.close();
@@ -186,6 +194,142 @@ describe("SandyPluginAPI: status (PL-02)", () => {
       expect(status.sandbox.degraded).toBe(false);
       expect(status.mcp.connected).toContain("crm");
       expect(status.mcp.failed).toEqual([]);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe("SandyPluginAPI: write-back (issue #16 / Q6)", () => {
+  it("sandy.status reports the write posture (disabled by default)", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, [ws]);
+    const { api, close } = await makeSession(cfg);
+    try {
+      expect(api.status({}).write).toEqual({ enabled: false, allowlist: [] });
+    } finally {
+      await close();
+    }
+  });
+
+  it("refuses a write when no write_allowlist is configured (fail closed)", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, [ws], ["read_deals", "write_deal"]);
+    const { api, close } = await makeSession(cfg, {}, ["read_deals", "write_deal"]);
+    try {
+      const result = await api.write({
+        tasks: [{ id: "w1", server: "crm", tool: "write_deal", args: { region: "emea" } }],
+        approvals: { w1: { approver: "alice", reason: "user confirmed" } },
+      });
+      expect(result.results[0]).toMatchObject({ allowed: false, reason: "gate-refused" });
+    } finally {
+      await close();
+    }
+  });
+
+  it("refuses a write that is not on the write allowlist, and never touches the wire", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, [ws], ["read_deals", "write_deal"], [
+      { server: "crm", tool: "read_deals" },
+    ]);
+    const { api, crm, close } = await makeSession(cfg, {}, ["read_deals", "write_deal"]);
+    try {
+      const result = await api.write({
+        tasks: [{ id: "w1", server: "crm", tool: "write_deal", args: {} }],
+        approvals: { w1: { approver: "alice", reason: "user confirmed" } },
+      });
+      expect(result.results[0]).toMatchObject({ allowed: false, reason: "not-allowed-by-policy" });
+      expect(crm.calls.get("write_deal")).toBeUndefined();
+    } finally {
+      await close();
+    }
+  });
+
+  it("refuses an allowlisted write with no approval (never auto-approved)", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, [ws], ["read_deals", "write_deal"], [
+      { server: "crm", tool: "write_deal" },
+    ]);
+    const { api, crm, close } = await makeSession(cfg, {}, ["read_deals", "write_deal"]);
+    try {
+      const result = await api.write({
+        tasks: [{ id: "w1", server: "crm", tool: "write_deal", args: {} }],
+      });
+      expect(result.results[0]).toMatchObject({ allowed: false, reason: "no-approval" });
+      expect(crm.calls.get("write_deal")).toBeUndefined();
+    } finally {
+      await close();
+    }
+  });
+
+  it("executes an approved, allowlisted write and audits it (single-use approval)", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, [ws], ["read_deals", "write_deal"], [
+      { server: "crm", tool: "write_deal" },
+    ]);
+    const { api, session, crm, close } = await makeSession(cfg, {}, ["read_deals", "write_deal"]);
+    try {
+      const result = await api.write({
+        tasks: [{ id: "w1", server: "crm", tool: "write_deal", args: { region: "emea" } }],
+        approvals: { w1: { approver: "alice", reason: "user confirmed" } },
+      });
+      expect(result.results[0]).toMatchObject({ task: "w1", allowed: true });
+      expect(result.results[0]!.error).toBeUndefined();
+      expect(crm.calls.get("write_deal")).toBe(1);
+      expect(crm.lastArgs.get("write_deal")).toEqual({ region: "emea" });
+      // The write is a distinct audited event, with the approver.
+      const writeEvents = session.sandy.audit.events().filter((e) => e.type === "write_attempt");
+      expect(writeEvents).toHaveLength(1);
+      expect(writeEvents[0]!.data).toMatchObject({ allowed: true, approver: "alice", approval_reason: "user confirmed" });
+      // The approval is single-use: re-invoking with the same approval is refused.
+      const replay = await api.write({
+        tasks: [{ id: "w1", server: "crm", tool: "write_deal", args: { region: "emea" } }],
+        approvals: { w1: { approver: "alice", reason: "user confirmed" } },
+      });
+      expect(replay.results[0]).toMatchObject({ allowed: false, reason: "no-approval" });
+      expect(crm.calls.get("write_deal")).toBe(1);
+    } finally {
+      await close();
+    }
+  });
+
+  it("reports a structured error when an approved write fails at the server", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, [ws], ["read_deals", "write_deal"], [
+      { server: "crm", tool: "write_deal" },
+    ]);
+    const crm = await makeInMemoryServer("crm", [
+      { name: "read_deals" },
+      { name: "write_deal", fail: true },
+    ]);
+    inMem.push(crm);
+    const cache = new SessionCache({
+      transportFactory: () => crm.transport,
+      detection: () => ({ runtime: "docker" as const, evidence: ["test"] }),
+    });
+    const session = await cache.get(cfg);
+    const api = new SandyPluginAPI(session);
+    try {
+      const result = await api.write({
+        tasks: [{ id: "w1", server: "crm", tool: "write_deal", args: {} }],
+        approvals: { w1: { approver: "alice", reason: "ok" } },
+      });
+      expect(result.results[0]).toMatchObject({ allowed: true });
+      expect(result.results[0]!.error).toBeDefined();
+      expect(result.results[0]!.error).toMatch(/boom|error/i);
+    } finally {
+      await cache.closeAll();
+      await crm.close();
+    }
+  });
+
+  it("rejects a malformed write body with a ToolInputError", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, [ws]);
+    const { api, close } = await makeSession(cfg);
+    try {
+      await expect(api.write({ tasks: [] })).rejects.toThrow(ToolInputError);
+      await expect(api.write({ tasks: [{ id: "w1", server: "crm", tool: "t", args: {} }], approvals: { w1: { approver: "a" } } })).rejects.toThrow(ToolInputError);
     } finally {
       await close();
     }
@@ -356,6 +500,7 @@ describe("createSandyMcpServer: MCP surface (PL-01/PL-02)", () => {
           "sandy.model.usage",
           "sandy.report",
           "sandy.status",
+          "sandy.write",
         ].sort(),
       );
 
