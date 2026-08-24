@@ -24,6 +24,7 @@ import {
 import { FileManager } from "./files/file-manager.js";
 import type { MutationJournal } from "./files/journal.js";
 import { createOrchestrator } from "./orchestrator/factory.js";
+import { legalToolCatalog } from "./orchestrator/templates.js";
 import type { Orchestrator } from "./orchestrator/orchestrator.js";
 import { createLlmEngine, threadsForCpuPercent, type EngineStatus, type LlmEngine } from "./engine.js";
 import { AutonomousLoop, type LoopResult } from "./standalone/loop.js";
@@ -263,10 +264,9 @@ export async function createSandy(deps: SandyDeps): Promise<Sandy> {
   // 7. Autonomous loop (Phase 2, design §2.1). The legal tool catalog is the
   //    manifest's allowed_tools — the model can only plan what the policy
   //    already allows (the allowlist is enforced twice: at planning and at the
-  //    MCP layer).
-  const toolCatalog = loaded.manifest.servers.flatMap((s) =>
-    s.allowed_tools.map((tool) => ({ server: s.name, tool })),
-  );
+  //    MCP layer). The same catalog is the shared legality check for
+  //    templates and ad-hoc requests (issue #15).
+  const toolCatalog = legalToolCatalog(loaded.manifest);
   const loop = new AutonomousLoop({
     engine,
     orchestrator,

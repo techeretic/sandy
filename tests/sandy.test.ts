@@ -59,6 +59,8 @@ async function writeConfig(
     mode?: string;
     maxCpuPercent?: number;
     preferences?: Record<string, unknown>;
+    /** A template registry (issue #15), written to templates.json + wired in. */
+    templates?: Record<string, unknown>;
   },
 ): Promise<string> {
   const crm = {
@@ -90,8 +92,12 @@ async function writeConfig(
       ignore_patterns: [],
     },
     ...(opts.preferences ? { preferences: opts.preferences } : {}),
+    ...(opts.templates ? { templates: { path: "./templates.json" } } : {}),
   };
   await writeFile(path.join(dir, "mcp-servers.json"), JSON.stringify(manifest, null, 2));
+  if (opts.templates) {
+    await writeFile(path.join(dir, "templates.json"), JSON.stringify(opts.templates, null, 2));
+  }
   const cfgPath = path.join(dir, "sandy.json");
   await writeFile(cfgPath, JSON.stringify(main, null, 2));
   return cfgPath;
@@ -544,6 +550,85 @@ describe("runCli: verbs + exit codes (real stdio MCP server)", () => {
     await writeFile(bad, JSON.stringify({ goal: "x", gather: [] }));
     const { value } = await captureStdout(() => runCli(["run", bad, "--config", path.join(root, "nope.json")], cliOverrides));
     expect(value).toBe(EXIT.usage);
+  });
+
+  it("run <template-name> runs the saved request and writes its report (issue #15)", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, {
+      allowedPaths: [ws],
+      crmCommand: stdioCommand,
+      templates: {
+        "deals-emea": {
+          goal: "deals",
+          gather: [{ id: "deals", server: "crm", tool: "read_deals", args: { region: "emea" } }],
+          report: { title: "Deals", file: "deals.md" },
+        },
+      },
+    });
+    const { value } = await captureStdout(() =>
+      runCli(["run", "deals-emea", "--config", cfg, "--no-progress"], cliOverrides),
+    );
+    expect(value).toBe(EXIT.ok);
+    const report = await fsRead(path.join(ws, "reports", "deals.md"), "utf8");
+    expect(report).toContain("# Deals");
+    expect(report).toContain("2 deals closed in emea");
+  });
+
+  it("run <existing-file> prefers the file over a same-named template (fail-closed, no guess)", async () => {
+    const ws = await tmpWorkspace();
+    const file = path.join(ws, "deals-emea.json");
+    // A request file whose basename (without .json) would collide with a
+    // template name: the existing file must win.
+    await writeFile(file, JSON.stringify({
+      goal: "file wins",
+      gather: [{ id: "deals", server: "crm", tool: "read_deals", args: {} }],
+      report: { title: "File Won", file: "file-won.md" },
+    }));
+    const cfg = await writeConfig(ws, {
+      allowedPaths: [ws],
+      crmCommand: stdioCommand,
+      templates: {
+        "deals-emea": {
+          goal: "should not run",
+          gather: [{ id: "deals", server: "crm", tool: "read_deals", args: {} }],
+          report: { title: "Template Won", file: "template-won.md" },
+        },
+      },
+    });
+    const { value } = await captureStdout(() =>
+      runCli(["run", file, "--config", cfg, "--no-progress"], cliOverrides),
+    );
+    expect(value).toBe(EXIT.ok);
+    expect(await fsRead(path.join(ws, "reports", "file-won.md"), "utf8")).toContain("# File Won");
+    await fsRead(path.join(ws, "reports", "template-won.md"), "utf8").catch((e: unknown) => {
+      expect((e as NodeJS.ErrnoException).code).toBe("ENOENT");
+    });
+  });
+
+  it("run <unknown-name> (no such file, no template) exits with the usage code", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, {
+      allowedPaths: [ws],
+      crmCommand: stdioCommand,
+      templates: { deals: { goal: "deals", gather: [{ id: "deals", server: "crm", tool: "read_deals" }] } },
+    });
+    const { value, stderr } = await captureStdout(() =>
+      runCli(["run", "no-such-thing", "--config", cfg, "--no-progress"], cliOverrides),
+    );
+    expect(value).toBe(EXIT.usage);
+    expect(stderr).toContain("no-such-thing");
+    expect(stderr).toMatch(/neither an existing file nor a known template/);
+  });
+
+  it("run <name> with no registry configured treats it as a missing file (usage)", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, { allowedPaths: [ws], crmCommand: stdioCommand });
+    const { value, stderr } = await captureStdout(() =>
+      runCli(["run", "deals-emea", "--config", cfg, "--no-progress"], cliOverrides),
+    );
+    expect(value).toBe(EXIT.usage);
+    expect(stderr).toMatch(/neither an existing file nor a known template/);
+    expect(stderr).toContain("none");
   });
 
   it("unknown verb exits with the usage code", async () => {

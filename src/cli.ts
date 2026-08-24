@@ -1,12 +1,21 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import process from "node:process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ConfigError } from "./config/loader.js";
+import { ConfigError, loadSandyConfig } from "./config/loader.js";
 import { SandboxViolationError } from "./sandbox/confinement.js";
 import { orchestratorRequestSchema, toOrchestratorRequest } from "./orchestrator/request.js";
+import {
+  legalToolCatalog,
+  resolveTemplate,
+  TemplateError,
+} from "./orchestrator/templates.js";
 import { createSandy, type Sandy, type SandyCheckReport, type SandyDeps } from "./sandy.js";
-import type { OrchestratorResult, ProgressEvent } from "./orchestrator/orchestrator.js";
+import type {
+  OrchestratorRequest,
+  OrchestratorResult,
+  ProgressEvent,
+} from "./orchestrator/orchestrator.js";
 import { NoModelEngineError, type LoopResult } from "./standalone/loop.js";
 import { createLocalApi } from "./standalone/api.js";
 
@@ -16,7 +25,7 @@ export const CLI_NAME = "sandy";
  * Exit codes — stable contract for callers/CI:
  *   0  ok (boundary intact; a *degraded* state is reported, not fatal)
  *   1  unexpected error
- *   2  bad usage (unknown verb / flags, or an invalid request file)
+ *   2  bad usage (unknown verb / flags, an invalid request file, or an unknown template name)
  *   3  config error (fail-closed: invalid config, missing env, VPN-02)
  *   4  sandbox violation (unsandboxed or declared/detected runtime mismatch)
  */
@@ -30,7 +39,8 @@ export const EXIT = {
 
 interface ParsedArgs {
   verb?: "check" | "run" | "ask" | "serve";
-  requestFile?: string;
+  /** The `run` target: a request file path or a template name (issue #15). */
+  runTarget?: string;
   goal?: string;
   port?: number;
   configPath?: string;
@@ -115,7 +125,13 @@ function parseArgs(argv: string[]): ParsedArgs {
   out.verb = verb;
   if (positional.length > 1) {
     if (verb === "run") {
-      out.requestFile = positional[1];
+      // The target is a request file path OR a template name (issue #15): a
+      // file that exists wins (so `run ./deals.json` always means the file);
+      // otherwise a template registry, if configured, is consulted — and only
+      // if the name is in it does it run as a template (fail-closed: an
+      // unknown name that is neither an existing file nor a template is a
+      // usage error, never a silent guess).
+      out.runTarget = positional[1];
       if (positional.length > 2) return { ...out, error: `unexpected argument: ${positional[2]}` };
     } else if (verb === "ask") {
       // The goal is natural language — join any remaining words (quoting varies
@@ -125,8 +141,8 @@ function parseArgs(argv: string[]): ParsedArgs {
       return { ...out, error: `unexpected argument: ${positional[1]}` };
     }
   }
-  if (verb === "run" && !out.requestFile) {
-    return { ...out, error: "`run` requires a request file: sandy run <request.json>" };
+  if (verb === "run" && !out.runTarget) {
+    return { ...out, error: "`run` requires a request file or template name: sandy run <request.json|template>" };
   }
   if (verb === "ask" && !out.goal) {
     return { ...out, error: "`ask` requires a goal: sandy ask \"<goal>\"" };
@@ -139,7 +155,7 @@ function printHelp(): void {
 
 usage:
   ${CLI_NAME} check [options]              validate config + print capability/health report
-  ${CLI_NAME} run <request.json> [options] run an orchestrator request (gather → report)
+  ${CLI_NAME} run <request.json|template> [options] run a request file or a saved template (issue #15)
   ${CLI_NAME} ask "<goal>" [options]       ask the bundled model to plan + run + narrate (standalone)
   ${CLI_NAME} serve [options]              run the standalone service (loopback API + ready model)
 
@@ -303,6 +319,44 @@ async function loadRequest(file: string): Promise<ReturnType<typeof toOrchestrat
   return toOrchestratorRequest(parsed.data);
 }
 
+/**
+ * Resolve the `sandy run` target to a request (issue #15): a file that exists
+ * is a request file; otherwise, if the config declares a template registry,
+ * the target is tried as a template NAME — and only an exact registry match
+ * runs as a template (fail-closed: an unknown name that is neither file nor
+ * template is a usage error, never a silent guess). A template resolves to a
+ * request validated by the same schema + legal tool catalog as an ad-hoc
+ * request, and the run is audited (`template_run`).
+ */
+async function loadRunTarget(
+  target: string,
+  configPath: string,
+): Promise<{ request: OrchestratorRequest; template?: string }> {
+  let isFile = false;
+  try {
+    isFile = (await stat(target)).isFile();
+  } catch {
+    isFile = false;
+  }
+  if (isFile) {
+    // An existing file is always a request file (no config needed — an invalid
+    // file is a usage error even with a broken config).
+    return { request: await loadRequest(target) };
+  }
+  // Not a file: the config is loaded (fail-closed) and the target is tried as
+  // a template name against the configured registry.
+  const loaded = await loadSandyConfig(configPath);
+  if (loaded.templates && Object.hasOwn(loaded.templates, target)) {
+    const request = resolveTemplate(loaded.templates, target, legalToolCatalog(loaded.manifest));
+    return { request, template: target };
+  }
+  const registered = loaded.templates ? Object.keys(loaded.templates).join(", ") : "none";
+  throw new UsageError(
+    `"${target}" is neither an existing file nor a known template (templates configured: ${registered}). ` +
+      "Usage: sandy run <request.json|template>",
+  );
+}
+
 class UsageError extends Error {}
 class RunError extends Error {
   readonly code: number;
@@ -446,8 +500,20 @@ export async function runCli(argv: string[], overrides: Partial<SandyDeps> = {})
       return EXIT.ok;
     }
     // verb === "run"
-    const request = await loadRequest(args.requestFile!);
-    const result = await withSandy(args, (s) => s.run(request), overrides);
+    // The target is a request file or a template name (issue #15). A target
+    // that exists as a file is ALWAYS the request file (no config needed — an
+    // invalid file is a usage error even with a broken config); otherwise the
+    // config is loaded (fail-closed) and the target is tried as a template
+    // name against the configured registry.
+    const { request, template } = await loadRunTarget(
+      args.runTarget!,
+      resolveConfigPath(args.configPath),
+    );
+    const result = await withSandy(args, (s) => {
+      // A template run is a distinct audited fact (AU-01, issue #15).
+      if (template !== undefined) s.audit.append("template_run", { template });
+      return s.run(request);
+    }, overrides);
     if (args.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     else process.stdout.write(formatRunText(result, args.auditFile) + "\n");
     return EXIT.ok;

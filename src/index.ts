@@ -128,6 +128,16 @@ export {
   type OrchestratorRequestInput,
 } from "./orchestrator/request.js";
 export {
+  legalToolCatalog,
+  loadTemplateRegistry,
+  parseRunBody,
+  resolveTemplate,
+  templateRegistrySchema,
+  TemplateError,
+  validateRequest,
+  type TemplateRegistry,
+} from "./orchestrator/templates.js";
+export {
   REPORT_FORMATS,
   reportFormatExtension,
   renderHtmlReport,

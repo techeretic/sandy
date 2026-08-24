@@ -9,6 +9,7 @@ import {
 } from "./schema.js";
 import { endpointMatches } from "../sandbox/network.js";
 import { REPORT_FORMATS, type ReportFormat } from "../orchestrator/report.js";
+import { loadTemplateRegistry, type TemplateRegistry } from "../orchestrator/templates.js";
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -80,6 +81,12 @@ export interface LoadedConfig {
    * format `renderReport` accepts.
    */
   reportFormat: ReportFormat;
+  /**
+   * The validated template registry (issue #15 / RG-08), when `templates.path`
+   * is configured. The loader fails closed on an unreadable/invalid registry,
+   * so this is always a well-formed set of named saved requests.
+   */
+  templates?: TemplateRegistry;
   resolveSecret: (ref: EnvRef) => string;
 }
 
@@ -173,6 +180,38 @@ export async function loadSandyConfig(
     }
   }
 
+  // Template registry (issue #15 / RG-08): an optional sidecar of named saved
+  // requests. Loaded and validated here — fail-closed, like the manifest — so
+  // every entry point (CLI, API) sees the same well-formed registry. A bad
+  // registry is a config error (ConfigError), same as a bad manifest.
+  let templates: TemplateRegistry | undefined;
+  if (config.templates?.path !== undefined) {
+    const templatesPath = path.isAbsolute(config.templates.path)
+      ? config.templates.path
+      : path.resolve(configDir, config.templates.path);
+    try {
+      templates = await loadTemplateRegistry(templatesPath);
+    } catch (err) {
+      // loadTemplateRegistry's message already names the file + the issue.
+      throw new ConfigError(`invalid template registry (templates.path): ${err instanceof Error ? err.message : String(err)}`);
+    }
+    for (const [name, request] of Object.entries(templates)) {
+      for (const task of request.gather) {
+        const server = manifest.servers.find((s) => s.name === task.server);
+        if (!server) {
+          throw new ConfigError(
+            `template "${name}" references unknown server "${task.server}" (legal servers: ${manifest.servers.map((s) => s.name).join(", ")}). Refusing to start (fail-closed).`,
+          );
+        }
+        if (!server.allowed_tools.includes(task.tool)) {
+          throw new ConfigError(
+            `template "${name}" references tool "${task.tool}", which is not allowed on server "${task.server}" (legal tools: ${server.allowed_tools.join(", ")}). Refusing to start (fail-closed).`,
+          );
+        }
+      }
+    }
+  }
+
   const collector: EnvRefCollector = { refs: new Set(), visit: (v) => collectEnvRefs(v, collector) };
   collector.visit(config);
   collector.visit(manifest);
@@ -196,6 +235,7 @@ export async function loadSandyConfig(
     manifestPath,
     reportOutputDir,
     reportFormat,
+    ...(templates !== undefined ? { templates } : {}),
     resolveSecret: (ref) => resolver.resolve(ref),
   };
 }

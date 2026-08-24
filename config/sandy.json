@@ -11,6 +11,7 @@
     "max_cpu_percent": 50
   },
   "mcp_servers": "./mcp-servers.json",
+  "templates": { "path": "./templates.json" },
   "report_output_dir": "./reports",
   "policy": {
     "confirmation_required": ["delete", "overwrite"],

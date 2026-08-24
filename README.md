@@ -60,6 +60,7 @@ User (CLI / Claude Code / Codex)
 ```bash
 node bin/sandy.js check  --config config/sandy.json     # validate config + capability/health report
 node bin/sandy.js run <request.json> --config config/sandy.json   # gather → provenance-tracked report
+node bin/sandy.js run <template> --config config/sandy.json       # re-run a saved request (templates.json)
 # add --json for machine-readable output, --audit <path> to persist the JSONL log
 ```
 
@@ -101,7 +102,7 @@ npm run conformance:sandbox  # Docker + Firejail sandbox matrix (identical-behav
 
 ## Status
 
-**v0.1.1 — Phase 1 and Phase 2 are complete, and the real bundled model is proven end-to-end.** All 205 tests pass; typecheck + build green. Reports render as Markdown (source of truth) or HTML (`preferences.default_report_format`), with every claim traceable to its source call.
+**v0.1.1 — Phase 1 and Phase 2 are complete, and the real bundled model is proven end-to-end.** All 222 tests pass; typecheck + build green. Reports render as Markdown (source of truth) or HTML (`preferences.default_report_format`), with every claim traceable to its source call. Saved report templates (`templates.json`, issue #15) re-run a named request via `sandy run <template>` or `POST /run {"template"}` — validated by the same schema + legal tool catalog as any ad-hoc request.
 
 - **Both modes built and conformance-proven.** Plugin mode (host LLM reasons, Sandy executes as ten `sandy.*` MCP tools) and standalone mode (bundled llama.cpp model, autonomous plan→run→narrate loop, loopback-only `sandy serve` REST API) are complete. The launch success criterion — zero network egress outside declared MCP endpoints — is proven in-process and at the network level in Docker, and the enforcer is proven runtime-agnostic: the same config + request under Docker and Firejail produce byte-identical behavior for **both** modes (CI matrix).
 - **A real bundled model ran the full loop in a no-egress sandbox.** Qwen3-4B-Instruct-2507 (Vulkan/GPU, SHA256-pinned) planned (validated against the policy's legal tool catalog), the MCP tool ran, a provenance-tracked report was written, the model narrated (clearly labeled), usage was audited, and the model process was reaped. Provisioning is out-of-band (`scripts/provision-model.sh`); the runtime never downloads a model.
