@@ -12,6 +12,7 @@ import {
   modelUsageShape,
   reportToolInput,
   statusToolInput,
+  writeToolInput,
 } from "./tools.js";
 
 /**
@@ -94,6 +95,17 @@ export function createSandyMcpServer(options: SandyMcpServerOptions): McpServer 
       inputSchema: modelUsageShape,
     },
     wrap((args) => api.modelUsage(args)),
+  );
+
+  server.registerTool(
+    "sandy.write",
+    {
+      description:
+        "Write back to an internal system via an MCP tool. Approval-gated (Q6): each task must be on the admin write allowlist AND carry an explicit per-write approval " +
+        "(ask the user first; approvals are single-use and audited). Tasks without a valid approval are refused, never auto-approved.",
+      inputSchema: writeToolInput.shape,
+    },
+    wrap((args) => api.write(args)),
   );
 
   server.registerTool(

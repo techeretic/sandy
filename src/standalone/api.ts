@@ -619,6 +619,14 @@ function describeProgressEvent(e: ProgressEvent): string {
       return `${e.task} failed: ${e.error}`;
     case "report-writing":
       return `writing report → ${e.path}`;
+    case "write-approved":
+      return `write ${e.task} → ${e.server}/${e.tool} approved by ${e.approver}`;
+    case "write-denied":
+      return `write ${e.task} denied: ${e.reason}`;
+    case "write-succeeded":
+      return `write ${e.task} ok (${e.durationMs}ms)`;
+    case "write-failed":
+      return `write ${e.task} failed: ${e.error}`;
     case "done":
       return `done: ${e.claims} claim(s), ${e.gaps} gap(s)`;
     case "parse-started":

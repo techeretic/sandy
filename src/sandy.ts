@@ -25,7 +25,14 @@ import { FileManager } from "./files/file-manager.js";
 import type { MutationJournal } from "./files/journal.js";
 import { createOrchestrator } from "./orchestrator/factory.js";
 import { legalToolCatalog } from "./orchestrator/templates.js";
-import type { Orchestrator } from "./orchestrator/orchestrator.js";
+import {
+  PolicyApprovalGate,
+  ReadOnlyGate,
+  type WriteApproval,
+  type WriteApprovalGate,
+  type WriteTask,
+} from "./orchestrator/write-gate.js";
+import type { Orchestrator, WriteResult } from "./orchestrator/orchestrator.js";
 import { createLlmEngine, threadsForCpuPercent, type EngineStatus, type LlmEngine } from "./engine.js";
 import { AutonomousLoop, type LoopResult } from "./standalone/loop.js";
 import type {
@@ -119,6 +126,15 @@ export interface SandyCheckReport {
   /** Reasoning-layer health (PRD §7). `not-started` is not a failure; only a
    *  `degraded` engine flips `ok`. */
   engine: EngineStatus;
+  /**
+   * Write-back posture (issue #16 / Q6). `enabled` is true only when an admin
+   * `write_allowlist` is configured; the allowlist lists the (server, tool)
+   * pairs a write may target. When absent, writes are refused (read-only).
+   */
+  write: {
+    enabled: boolean;
+    allowlist: Array<{ server: string; tool: string }>;
+  };
 }
 
 /**
@@ -142,12 +158,21 @@ export interface Sandy {
    * narrating move to the bundled `engine`.
    */
   loop: AutonomousLoop;
+  /** The gate every write task must pass (issue #16 / Q6). */
+  writeGate: WriteApprovalGate;
   /** Startup MCP connection result (ok / failed). */
   connectResult: ConnectResult;
   /** Capability + MCP health snapshot. */
   check(): SandyCheckReport;
   /** Execute an orchestrator request end-to-end (gather → report). */
   run(request: OrchestratorRequest): Promise<OrchestratorResult>;
+  /**
+   * Execute write-back tasks (issue #16 / Q6). Each task must pass the write
+   * gate — the admin write allowlist AND an explicit per-write approval —
+   * before it reaches a server. Refused writes are terminal, audited
+   * rejections, never retried.
+   */
+  write(tasks: WriteTask[], approvals?: Record<string, WriteApproval>): Promise<WriteResult[]>;
   /**
    * Ask the bundled model to do the whole job (standalone, design §2.1):
    * plan → gather → report → narrate. Delegates to {@link loop}.
@@ -251,6 +276,13 @@ export async function createSandy(deps: SandyDeps): Promise<Sandy> {
   //    loadSandyConfig has already refused an unimplemented format fail-closed,
   //    so loaded.reportFormat is a format the renderer can actually produce.
   const preferences = loaded.config.preferences;
+  // Write-back gate (issue #16 / Q6). When the admin configured a
+  // write_allowlist, a PolicyApprovalGate enforces it (each write still
+  // needs an explicit, per-write approval). Otherwise the default ReadOnlyGate
+  // refuses every write — fail closed, read-and-report.
+  const writeGate: WriteApprovalGate = loaded.writeAllowlist
+    ? new PolicyApprovalGate({ allowlist: loaded.writeAllowlist })
+    : new ReadOnlyGate();
   const orchestrator = createOrchestrator({
     manager,
     audit,
@@ -259,6 +291,7 @@ export async function createSandy(deps: SandyDeps): Promise<Sandy> {
     reportFormat: loaded.reportFormat,
     concurrency: deps.concurrency ?? preferences?.max_concurrent_mcp_calls,
     onProgress: deps.onProgress,
+    writeGate,
   });
 
   // 7. Autonomous loop (Phase 2, design §2.1). The legal tool catalog is the
@@ -287,6 +320,7 @@ export async function createSandy(deps: SandyDeps): Promise<Sandy> {
     files,
     orchestrator,
     loop,
+    writeGate,
     connectResult,
     check(): SandyCheckReport {
       const report = enforcer.report;
@@ -318,10 +352,17 @@ export async function createSandy(deps: SandyDeps): Promise<Sandy> {
           health: manager.health(),
         },
         engine: engineStatus,
+        write: {
+          enabled: loaded.writeAllowlist !== undefined,
+          allowlist: loaded.writeAllowlist ?? [],
+        },
       };
     },
     run(request: OrchestratorRequest): Promise<OrchestratorResult> {
       return orchestrator.run(request);
+    },
+    write(tasks: WriteTask[], approvals?: Record<string, WriteApproval>): Promise<WriteResult[]> {
+      return orchestrator.write(tasks, approvals);
     },
     ask(goal: string): Promise<LoopResult> {
       return loop.run(goal);

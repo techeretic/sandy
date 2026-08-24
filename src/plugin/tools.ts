@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Claim, Gap } from "../orchestrator/orchestrator.js";
+import type { Claim, Gap, WriteResult } from "../orchestrator/orchestrator.js";
 import type { SandyCheckReport } from "../sandy.js";
 import { gatherTaskSchema } from "../orchestrator/request.js";
 
@@ -58,6 +58,65 @@ export const reportToolInput = z
 export interface ReportToolResult extends GatherToolResult {
   reportPath?: string;
   reportContent?: string;
+}
+
+// --- sandy.write -----------------------------------------------------------
+
+/**
+ * One write-back task: a single tool call on one MCP server that MUTATES
+ * internal state (issue #16 / Q6). Distinct from a gather task — a write
+ * must pass the write-approval gate before it is routed anywhere.
+ */
+export const writeTaskInput = z
+  .object({
+    id: z.string().min(1).describe("Stable id used in the audit trail"),
+    server: z.string().min(1).describe("MCP server name"),
+    tool: z.string().min(1).describe("Mutating tool to call on that server"),
+    args: z.record(z.string(), z.unknown()).default({}),
+  })
+  .strict();
+
+export type WriteTaskInput = z.infer<typeof writeTaskInput>;
+
+/**
+ * An explicit, per-write human approval (Q6 contract point 3). The host asks
+ * the USER and only then fills this in — Sandy never creates one itself
+ * (FM-04: never auto-confirm). The approval is single-use: it is bound to
+ * exactly one task id and consumed by the gate.
+ */
+export const writeApprovalShape = {
+  approver: z
+    .string()
+    .min(1)
+    .describe("Who approved — the human principal or an approved automation's identity"),
+  reason: z.string().min(1).describe("Why the write was approved (audited)"),
+} as const;
+
+export type WriteApprovalInput = z.infer<typeof writeApprovalShape>;
+
+export const writeToolInput = z
+  .object({
+    tasks: z.array(writeTaskInput).min(1, { message: "at least one write task is required" }),
+    /**
+     * Per-task approvals, keyed by task id. A task with no approval (or a
+     * mismatched/consumed one) is refused with `no-approval` — never
+     * auto-approved.
+     */
+    approvals: z
+      .record(z.string(), z.object(writeApprovalShape))
+      .optional(),
+  })
+  .strict();
+
+/**
+ * The outcome of one write task — the orchestrator's {@link WriteResult}
+ * (issue #16 / Q6): a refused write is a terminal, audited rejection, never a
+ * silent retry.
+ */
+export type WriteTaskResult = WriteResult;
+
+export interface WriteToolResult {
+  results: WriteResult[];
 }
 
 // --- sandy.status ----------------------------------------------------------

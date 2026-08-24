@@ -16,6 +16,7 @@ import {
   reportFormatExtension,
   REPORT_FORMATS,
   Orchestrator,
+  PolicyApprovalGate,
   ReadOnlyGate,
   logWriteAttempt,
   createOrchestrator,
@@ -25,6 +26,7 @@ import {
   type GatherTask,
   type Claim,
   type Gap,
+  type WriteTask,
 } from "../src/index.js";
 import {
   makeInMemoryServer,
@@ -391,21 +393,234 @@ describe("Report formats (issue #14): claims/provenance survive the transform", 
 });
 
 describe("Write gate (Q6)", () => {
-  it("ReadOnlyGate refuses every write", () => {
+  it("ReadOnlyGate refuses every write, even with an approval", () => {
     const gate = new ReadOnlyGate();
-    const decision = gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: {} });
+    const decision = gate.decide(
+      { id: "w1", server: "crm", tool: "write_deal", args: {} },
+      { taskId: "w1", approver: "alice", reason: "ok" },
+    );
     expect(decision.allowed).toBe(false);
     if (!decision.allowed) expect(decision.reason).toBe("gate-refused");
   });
 
-  it("logs a write attempt + decision to the audit trail", () => {
+  it("PolicyApprovalGate refuses a target not on the write allowlist (not-allowed-by-policy)", () => {
+    const gate = new PolicyApprovalGate({ allowlist: [{ server: "crm", tool: "write_deal" }] });
+    const d1 = gate.decide({ id: "w1", server: "crm", tool: "delete_deal", args: {} });
+    expect(d1).toEqual({ allowed: false, reason: "not-allowed-by-policy" });
+    // A read-allowed tool that is not on the (stricter) write allowlist is also refused.
+    const d2 = gate.decide({ id: "w2", server: "crm", tool: "read_deals", args: {} });
+    expect(d2).toEqual({ allowed: false, reason: "not-allowed-by-policy" });
+    // An unknown server is refused.
+    const d3 = gate.decide({ id: "w3", server: "erp", tool: "write_deal", args: {} });
+    expect(d3).toEqual({ allowed: false, reason: "not-allowed-by-policy" });
+  });
+
+  it("PolicyApprovalGate refuses an allowlisted write without an approval (no-approval)", () => {
+    const gate = new PolicyApprovalGate({ allowlist: [{ server: "crm", tool: "write_deal" }] });
+    const decision = gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: { id: 1 } });
+    expect(decision).toEqual({ allowed: false, reason: "no-approval" });
+  });
+
+  it("PolicyApprovalGate allows an allowlisted write with a matching approval, and carries it on the decision", () => {
+    const gate = new PolicyApprovalGate({ allowlist: [{ server: "crm", tool: "write_deal" }] });
+    const approval = { taskId: "w1", approver: "alice", reason: "user confirmed" };
+    expect(gate.approve(approval)).toBe(true);
+    const decision = gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: { id: 1 } }, approval);
+    expect(decision.allowed).toBe(true);
+    if (decision.allowed) expect(decision.approval).toEqual(approval);
+  });
+
+  it("PolicyApprovalGate approvals are single-use: a consumed approval cannot be replayed", () => {
+    const gate = new PolicyApprovalGate({ allowlist: [{ server: "crm", tool: "write_deal" }] });
+    const approval = { taskId: "w1", approver: "alice", reason: "user confirmed" };
+    gate.approve(approval);
+    const first = gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: {} }, approval);
+    expect(first.allowed).toBe(true);
+    // The same approval object, replayed onto the same task: refused.
+    const second = gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: {} }, approval);
+    expect(second).toEqual({ allowed: false, reason: "no-approval" });
+  });
+
+  it("PolicyApprovalGate refuses an approval bound to a different task", () => {
+    const gate = new PolicyApprovalGate({ allowlist: [{ server: "crm", tool: "write_deal" }] });
+    const approval = { taskId: "other", approver: "alice", reason: "user confirmed" };
+    gate.approve(approval);
+    const decision = gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: {} }, approval);
+    expect(decision).toEqual({ allowed: false, reason: "no-approval" });
+  });
+
+  it("PolicyApprovalGate refuses a duplicate approval registration (no standing blanket consent)", () => {
+    const gate = new PolicyApprovalGate({ allowlist: [{ server: "crm", tool: "write_deal" }] });
+    const approval = { taskId: "w1", approver: "alice", reason: "user confirmed" };
+    expect(gate.approve(approval)).toBe(true);
+    expect(gate.approve(approval)).toBe(false);
+    // The first registration is still the only valid one.
+    const decision = gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: {} }, approval);
+    expect(decision.allowed).toBe(true);
+  });
+
+  it("an empty allowlist refuses everything (fail-closed default posture)", () => {
+    const gate = new PolicyApprovalGate({ allowlist: [] });
+    const approval = { taskId: "w1", approver: "alice", reason: "ok" };
+    gate.approve(approval);
+    const decision = gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: {} }, approval);
+    expect(decision).toEqual({ allowed: false, reason: "not-allowed-by-policy" });
+  });
+
+  it("logs a write attempt + decision to the audit trail (refused and allowed)", () => {
     const audit = new InMemoryAuditLogger();
     logWriteAttempt(audit, { id: "w1", server: "crm", tool: "write_deal", args: {} }, { allowed: false, reason: "gate-refused" });
+    logWriteAttempt(
+      audit,
+      { id: "w2", server: "crm", tool: "write_deal", args: {} },
+      { allowed: true, approval: { taskId: "w2", approver: "alice", reason: "ok" } },
+    );
     const events = audit.events();
-    expect(events[events.length - 1]?.type).toBe("write_attempt");
-    const data = events[events.length - 1]?.data as Record<string, unknown>;
-    expect(data.allowed).toBe(false);
-    expect(data.reason).toBe("gate-refused");
+    const refused = events[events.length - 2];
+    expect(refused?.type).toBe("write_attempt");
+    const refusedData = refused?.data as Record<string, unknown>;
+    expect(refusedData.allowed).toBe(false);
+    expect(refusedData.reason).toBe("gate-refused");
+    const allowed = events[events.length - 1];
+    const allowedData = allowed?.data as Record<string, unknown>;
+    expect(allowed?.type).toBe("write_attempt");
+    expect(allowedData.allowed).toBe(true);
+    expect(allowedData.approver).toBe("alice");
+    expect(allowedData.approval_reason).toBe("ok");
+  });
+});
+
+describe("Orchestrator: write-back (Q6)", () => {
+  const crmWrite = { id: "w1", server: "crm", tool: "write_deal", args: { region: "emea" } } satisfies WriteTask;
+
+  async function withWriteManager<T>(
+    writeTools: string[],
+    fn: (manager: McpClientManager, crm: TestServer) => Promise<T>,
+  ): Promise<T> {
+    const configs = [
+      serverConfig("crm", ["read_deals", ...writeTools]),
+      serverConfig("jira", ["read_issues"]),
+    ];
+    const crm = await makeInMemoryServer("crm", [
+      { name: "read_deals" },
+      ...writeTools.map((name) => ({ name })),
+    ]);
+    const jira = await makeInMemoryServer("jira", [{ name: "read_issues" }]);
+    const manager = new McpClientManager(configs, resolver, guard, {
+      retry: instantRetry,
+      transportFactory: (c) => (c.name === "crm" ? crm.transport : jira.transport),
+    });
+    await manager.connectAll();
+    try {
+      return await fn(manager, crm);
+    } finally {
+      await manager.close();
+      await crm.close();
+      await jira.close();
+    }
+  }
+
+  it("refuses every write by default (ReadOnlyGate, fail closed)", async () => {
+    await withWriteManager(["write_deal"], async (manager, crm) => {
+      const audit = new InMemoryAuditLogger();
+      const events: ProgressEvent[] = [];
+      const orch = new Orchestrator({ manager, audit, onProgress: (e) => events.push(e) });
+      const results = await orch.write([crmWrite]);
+      expect(results).toEqual([
+        { task: "w1", server: "crm", tool: "write_deal", allowed: false, reason: "gate-refused" },
+      ]);
+      expect(crm.calls.get("write_deal")).toBeUndefined();
+      const writeEvents = audit.events().filter((e) => e.type === "write_attempt");
+      expect(writeEvents).toHaveLength(1);
+      expect(writeEvents[0]!.data).toMatchObject({ allowed: false, reason: "gate-refused" });
+      expect(events.some((e) => e.type === "write-denied")).toBe(true);
+    });
+  });
+
+  it("executes an approved, allowlisted write and returns the server result", async () => {
+    await withWriteManager(["write_deal"], async (manager, crm) => {
+      const audit = new InMemoryAuditLogger();
+      const events: ProgressEvent[] = [];
+      const gate = new PolicyApprovalGate({ allowlist: [{ server: "crm", tool: "write_deal" }] });
+      const approval = { taskId: "w1", approver: "alice", reason: "user confirmed" };
+      gate.approve(approval);
+      const orch = new Orchestrator({ manager, audit, writeGate: gate, onProgress: (e) => events.push(e) });
+
+      const results = await orch.write([crmWrite], { w1: approval });
+
+      expect(results).toHaveLength(1);
+      expect(results[0]!.allowed).toBe(true);
+      expect(results[0]!.error).toBeUndefined();
+      // The call actually reached the server, with the task's args.
+      expect(crm.calls.get("write_deal")).toBe(1);
+      expect(crm.lastArgs.get("write_deal")).toEqual({ region: "emea" });
+      // The approval is single-use: the same approval no longer works.
+      const replay = await orch.write([crmWrite], { w1: approval });
+      expect(replay[0]!.allowed).toBe(false);
+      if (replay[0]!.allowed === false) expect(replay[0]!.reason).toBe("no-approval");
+      expect(crm.calls.get("write_deal")).toBe(1);
+      // Progress events surfaced the approval and the execution.
+      expect(events.some((e) => e.type === "write-approved" && (e as { approver?: string }).approver === "alice")).toBe(true);
+      expect(events.some((e) => e.type === "write-succeeded")).toBe(true);
+      // Both decisions are audited, with the approval on the allowed one.
+      const writeEvents = audit.events().filter((e) => e.type === "write_attempt");
+      expect(writeEvents.map((e) => e.data["allowed"])).toEqual([true, false]);
+      expect(writeEvents[0]!.data["approver"]).toBe("alice");
+    });
+  });
+
+  it("refuses a write whose target is not on the allowlist, before anything hits the wire", async () => {
+    await withWriteManager(["write_deal"], async (manager, crm) => {
+      const audit = new InMemoryAuditLogger();
+      const gate = new PolicyApprovalGate({ allowlist: [{ server: "crm", tool: "write_deal" }] });
+      const orch = new Orchestrator({ manager, audit, writeGate: gate });
+      const results = await orch.write([
+        { id: "w1", server: "crm", tool: "read_deals", args: {} },
+      ]);
+      expect(results[0]).toMatchObject({ allowed: false, reason: "not-allowed-by-policy" });
+      expect(crm.calls.get("read_deals")).toBeUndefined();
+    });
+  });
+
+  it("refuses an allowlisted write when no approval is presented (never auto-approved)", async () => {
+    await withWriteManager(["write_deal"], async (manager, crm) => {
+      const gate = new PolicyApprovalGate({ allowlist: [{ server: "crm", tool: "write_deal" }] });
+      const orch = new Orchestrator({ manager, audit: new InMemoryAuditLogger(), writeGate: gate });
+      const results = await orch.write([crmWrite]);
+      expect(results[0]).toMatchObject({ allowed: false, reason: "no-approval" });
+      expect(crm.calls.get("write_deal")).toBeUndefined();
+    });
+  });
+
+  it("surfaces a write failure from the server (approved, then the tool errors)", async () => {
+    // A failing tool behind a real allowlisted entry.
+    const configs = [serverConfig("crm", ["write_deal"])];
+    const crm = await makeInMemoryServer("crm", [{ name: "write_deal", fail: true }]);
+    const manager = new McpClientManager(configs, resolver, guard, {
+      retry: instantRetry,
+      transportFactory: () => crm.transport,
+    });
+    await manager.connectAll();
+    try {
+      const audit = new InMemoryAuditLogger();
+      const events: ProgressEvent[] = [];
+      const gate = new PolicyApprovalGate({ allowlist: [{ server: "crm", tool: "write_deal" }] });
+      const approval = { taskId: "w1", approver: "alice", reason: "ok" };
+      gate.approve(approval);
+      const orch = new Orchestrator({ manager, audit, writeGate: gate, onProgress: (e) => events.push(e) });
+
+      const results = await orch.write([crmWrite], { w1: approval });
+
+      expect(results[0]!.allowed).toBe(true);
+      expect(results[0]!.error).toBeDefined();
+      expect(results[0]!.error).toMatch(/boom|error/i);
+      expect(events.some((e) => e.type === "write-failed")).toBe(true);
+      const writeEvents = audit.events().filter((e) => e.type === "write_attempt");
+      expect(writeEvents.map((e) => e.data["allowed"])).toEqual([true]);
+    } finally {
+      await manager.close();
+      await crm.close();
+    }
   });
 });
 

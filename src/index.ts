@@ -10,6 +10,7 @@ export {
   mcpServersManifestSchema,
   mcpServerSchema,
   sandyConfigSchema,
+  writeAllowlistEntrySchema,
   type AuthConfig,
   type EnvRef,
   type LlmConfig,
@@ -119,6 +120,7 @@ export {
   type OrchestratorResult,
   type ProgressEvent,
   type RenderReportInput,
+  type WriteResult,
 } from "./orchestrator/orchestrator.js";
 export {
   gatherTaskSchema,
@@ -150,8 +152,12 @@ export {
   type OrchestratorFactoryOptions,
 } from "./orchestrator/factory.js";
 export {
-  ReadOnlyGate,
   logWriteAttempt,
+  PolicyApprovalGate,
+  ReadOnlyGate,
+  type PolicyApprovalGateOptions,
+  type WriteAllowlistEntry,
+  type WriteApproval,
   type WriteApprovalGate,
   type WriteDecision,
   type WriteTask,
@@ -228,6 +234,9 @@ export {
   modelUsageShape,
   reportToolInput,
   statusToolInput,
+  writeApprovalShape,
+  writeTaskInput,
+  writeToolInput,
   type FilesListResult,
   type FilesMutateResult,
   type FilesReadResult,
@@ -235,6 +244,10 @@ export {
   type ModelUsageToolResult,
   type ReportToolResult,
   type StatusToolResult,
+  type WriteApprovalInput,
+  type WriteTaskInput,
+  type WriteTaskResult,
+  type WriteToolResult,
 } from "./plugin/tools.js";
 export { resolveRetryPolicy, withRetry, DEFAULT_RETRY } from "./mcp/retry.js";
 export {

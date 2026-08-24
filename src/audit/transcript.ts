@@ -69,7 +69,9 @@ function describeEvent(event: AuditEvent): string {
     case "orchestrator_task":
       return `task \`${cell(d.task)}\` → \`${cell(d.server)}/${cell(d.tool)}\` ${cell(d.outcome)}`;
     case "write_attempt":
-      return `write \`${cell(d.server)}/${cell(d.tool)}\` → ${d.allowed ? "allowed" : `refused (${cell(d.reason)})`}`;
+      return d.allowed
+        ? `write \`${cell(d.server)}/${cell(d.tool)}\` → allowed (approved by ${cell(d.approver)})`
+        : `write \`${cell(d.server)}/${cell(d.tool)}\` → refused (${cell(d.reason)})`;
     case "sandbox_violation":
       return `violation: ${cell(d.detail)}`;
     case "egress_blocked":

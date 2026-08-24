@@ -4,7 +4,13 @@ import { McpCallError } from "../mcp/types.js";
 import type { AuditLogger } from "../audit/logger.js";
 import { captureTranscript, type Transcript } from "../audit/transcript.js";
 import { renderMarkdownReport, renderReport, reportFormatExtension, type ReportFormat } from "./report.js";
-import type { WriteApprovalGate } from "./write-gate.js";
+import {
+  logWriteAttempt,
+  ReadOnlyGate,
+  type WriteApproval,
+  type WriteApprovalGate,
+  type WriteTask,
+} from "./write-gate.js";
 
 /**
  * A single retrieval unit: one tool call on one MCP server.
@@ -25,6 +31,11 @@ export type ProgressEvent =
   | { type: "task-succeeded"; task: string; durationMs: number }
   | { type: "task-failed"; task: string; error: string }
   | { type: "report-writing"; path: string }
+  // Write-back (Q6): a write task passing the approval gate.
+  | { type: "write-approved"; task: string; server: string; tool: string; approver: string }
+  | { type: "write-denied"; task: string; reason: string }
+  | { type: "write-succeeded"; task: string; durationMs: number }
+  | { type: "write-failed"; task: string; error: string }
   | { type: "done"; claims: number; gaps: number }
   // Autonomous-loop (Phase 2) stages — the host LLM's planning/narrating, done
   // by the bundled model instead.
@@ -55,6 +66,25 @@ export interface Gap {
   tool: string;
   reason: "server-unavailable" | "call-failed" | "empty-result";
   detail: string;
+}
+
+/**
+ * The outcome of one write task (Q6). A refused write is a terminal, audited
+ * rejection (contract point 5) — it is reported here, never retried silently,
+ * and never turns into a claim or a gap (a write is a distinct task kind from
+ * a gather).
+ */
+export interface WriteResult {
+  task: string;
+  server: string;
+  tool: string;
+  allowed: boolean;
+  /** Why it was refused (absent when allowed). */
+  reason?: "not-allowed-by-policy" | "no-approval" | "gate-refused";
+  /** The server's result, when the write was approved and executed. */
+  result?: unknown;
+  /** The failure, when an approved write could not be executed. */
+  error?: string;
 }
 
 export interface OrchestratorRequest {
@@ -111,9 +141,9 @@ export interface OrchestratorOptions {
   /** Writes the rendered report to disk (confined by the File Manager). Returns the path. */
   writeReport?: (content: string, file: string) => Promise<string>;
   /**
-   * Design seam for write-back (Q6). v1 never routes a write task; a future
-   * write path must pass this gate before reaching a server. Present on the
-   * orchestrator so the contract is fixed now.
+   * The gate every write task must pass before reaching a server (Q6).
+   * Defaults to {@link ReadOnlyGate} — refuse all writes — so a deployment
+   * that has not opted into write-back can never write.
    */
   writeGate?: WriteApprovalGate;
 }
@@ -166,6 +196,7 @@ export class Orchestrator {
   private readonly reportFormat: ReportFormat;
   private readonly renderReport: (input: RenderReportInput) => string;
   private readonly writeReport: ((content: string, file: string) => Promise<string>) | null;
+  private readonly writeGate: WriteApprovalGate;
 
   constructor(options: OrchestratorOptions) {
     this.manager = options.manager;
@@ -177,6 +208,9 @@ export class Orchestrator {
     // otherwise the default renderer is bound to the configured format.
     this.renderReport = options.renderReport ?? ((input) => renderReport(this.reportFormat, input));
     this.writeReport = options.writeReport ?? null;
+    // Fail closed: a deployment that has not supplied a gate refuses every
+    // write (the v1 read-and-report default, Q6).
+    this.writeGate = options.writeGate ?? new ReadOnlyGate();
   }
 
   /** The current progress sink (Q4). */
@@ -278,6 +312,81 @@ export class Orchestrator {
     this.audit.append("session_end", { claims: claims.length, gaps: gaps.length, report: reportPath ?? null, reportError: reportError ?? null });
 
     return { goal: request.goal, claims, gaps, reportPath, reportContent, reportError, transcript: captureTranscript(this.audit) };
+  }
+
+  /**
+   * Execute write tasks (Q6). Each task must pass the {@link WriteApprovalGate}
+   * before it reaches a server; the decision is audited for every task
+   * regardless of outcome (AU-01). A refused write is terminal — reported in
+   * the result, never retried, and never converted into a claim or a gap.
+   */
+  async write(tasks: WriteTask[], approvals?: Record<string, WriteApproval>): Promise<WriteResult[]> {
+    const results: WriteResult[] = [];
+    for (const task of tasks) {
+      const approval = approvals?.[task.id];
+      const decision = await this.writeGate.decide(task, approval);
+      logWriteAttempt(this.audit, task, decision);
+      if (!decision.allowed) {
+        this.onProgress({ type: "write-denied", task: task.id, reason: decision.reason });
+        results.push({
+          task: task.id,
+          server: task.server,
+          tool: task.tool,
+          allowed: false,
+          reason: decision.reason,
+        });
+        continue;
+      }
+      this.onProgress({
+        type: "write-approved",
+        task: task.id,
+        server: task.server,
+        tool: task.tool,
+        approver: decision.approval.approver,
+      });
+      const started = Date.now();
+      const argsHash = hashOf(task.args);
+      try {
+        const result = await this.manager.callTool(task.server, task.tool, task.args);
+        this.audit.append("orchestrator_task", {
+          task: task.id,
+          server: task.server,
+          tool: task.tool,
+          argsHash,
+          kind: "write",
+          outcome: "ok",
+          durationMs: Date.now() - started,
+        });
+        this.onProgress({ type: "write-succeeded", task: task.id, durationMs: Date.now() - started });
+        results.push({
+          task: task.id,
+          server: task.server,
+          tool: task.tool,
+          allowed: true,
+          result,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.audit.append("orchestrator_task", {
+          task: task.id,
+          server: task.server,
+          tool: task.tool,
+          argsHash,
+          kind: "write",
+          outcome: "error",
+          error: message,
+        });
+        this.onProgress({ type: "write-failed", task: task.id, error: message });
+        results.push({
+          task: task.id,
+          server: task.server,
+          tool: task.tool,
+          allowed: true,
+          error: message,
+        });
+      }
+    }
+    return results;
   }
 
   /**

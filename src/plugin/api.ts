@@ -12,6 +12,7 @@ import {
   type OrchestratorRequestInput,
 } from "../orchestrator/request.js";
 import type { OrchestratorResult, ProgressEvent } from "../orchestrator/orchestrator.js";
+import { PolicyApprovalGate, type WriteApproval, type WriteTask } from "../orchestrator/write-gate.js";
 import type { PluginSession } from "./state.js";
 import {
   filesDeleteInput,
@@ -24,6 +25,7 @@ import {
   modelUsageInput,
   reportToolInput,
   statusToolInput,
+  writeToolInput,
   type FilesListResult,
   type FilesMutateResult,
   type FilesReadResult,
@@ -31,6 +33,7 @@ import {
   type ModelUsageToolResult,
   type ReportToolResult,
   type StatusToolResult,
+  type WriteToolResult,
 } from "./tools.js";
 
 /**
@@ -102,6 +105,49 @@ export class SandyPluginAPI {
       reportPath: result.reportPath,
       reportContent: result.reportContent,
     };
+  }
+
+  /**
+   * `sandy.write` — write-back to internal systems (issue #16 / Q6). Each task
+   * must pass the session's write gate — the admin write allowlist AND an
+   * explicit, per-write approval — before it reaches a server. The approval is
+   * registered with the gate as the out-of-band human action, and is
+   * single-use: the gate consumes it, and re-presenting the same approval is
+   * refused.
+   *
+   * Never auto-confirm (FM-04): a task without a valid approval is refused
+   * with `no-approval` and audited — it is never executed. A refused write is
+   * terminal (contract point 5): it is reported in the result, never retried.
+   */
+  async write(input: unknown): Promise<WriteToolResult> {
+    const body = validate("sandy.write", writeToolInput, input);
+    const gate = this.session.sandy.writeGate;
+    const taskIds = new Set(body.tasks.map((t) => t.id));
+    const approvals: Record<string, WriteApproval> = {};
+    for (const [taskId, approval] of Object.entries(body.approvals ?? {})) {
+      // Only register approvals for a task in THIS call — a stray approval
+      // can never be banked for a later write.
+      if (!taskIds.has(taskId)) continue;
+      const writeApproval: WriteApproval = {
+        taskId,
+        approver: approval.approver,
+        reason: approval.reason,
+      };
+      // Register the approval out-of-band (the human act). A duplicate
+      // (taskId, approver) pair is refused, so a captured approval can never
+      // be replayed onto a second write.
+      if (gate instanceof PolicyApprovalGate) {
+        gate.approve(writeApproval);
+      }
+      approvals[taskId] = writeApproval;
+    }
+    const tasks: WriteTask[] = body.tasks.map((t) => ({
+      id: t.id,
+      server: t.server,
+      tool: t.tool,
+      args: t.args,
+    }));
+    return { results: await this.session.sandy.write(tasks, approvals) };
   }
 
   private async run(request: ReturnType<typeof toOrchestratorRequest>): Promise<ReportToolResult> {
