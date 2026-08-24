@@ -127,7 +127,14 @@ export {
   toOrchestratorRequest,
   type OrchestratorRequestInput,
 } from "./orchestrator/request.js";
-export { renderMarkdownReport } from "./orchestrator/report.js";
+export {
+  REPORT_FORMATS,
+  reportFormatExtension,
+  renderHtmlReport,
+  renderMarkdownReport,
+  renderReport,
+  type ReportFormat,
+} from "./orchestrator/report.js";
 export {
   createOrchestrator,
   type OrchestratorFactoryOptions,

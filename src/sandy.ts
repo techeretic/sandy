@@ -245,13 +245,17 @@ export async function createSandy(deps: SandyDeps): Promise<Sandy> {
     audit: fileSink,
   });
 
-  // 6. Orchestrator (RG-*), writing reports through the File Manager.
+  // 6. Orchestrator (RG-*), writing reports through the File Manager. The
+  //    report format comes from preferences.default_report_format (issue #14);
+  //    loadSandyConfig has already refused an unimplemented format fail-closed,
+  //    so loaded.reportFormat is a format the renderer can actually produce.
   const preferences = loaded.config.preferences;
   const orchestrator = createOrchestrator({
     manager,
     audit,
     files,
     reportDir: loaded.reportOutputDir,
+    reportFormat: loaded.reportFormat,
     concurrency: deps.concurrency ?? preferences?.max_concurrent_mcp_calls,
     onProgress: deps.onProgress,
   });
@@ -269,6 +273,7 @@ export async function createSandy(deps: SandyDeps): Promise<Sandy> {
     audit,
     files,
     reportDir: loaded.reportOutputDir,
+    reportFormat: loaded.reportFormat,
     tools: toolCatalog,
     onProgress: deps.onProgress,
   });

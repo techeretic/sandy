@@ -11,9 +11,16 @@ import {
   captureTranscript,
   transcriptToMarkdown,
   renderMarkdownReport,
+  renderReport,
+  renderHtmlReport,
+  reportFormatExtension,
+  REPORT_FORMATS,
   Orchestrator,
   ReadOnlyGate,
   logWriteAttempt,
+  createOrchestrator,
+  FileManager,
+  PathConfinement,
   type ProgressEvent,
   type GatherTask,
   type Claim,
@@ -327,6 +334,62 @@ describe("Report rendering (RG-02/04/05)", () => {
   });
 });
 
+describe("Report formats (issue #14): claims/provenance survive the transform", () => {
+  // A claim whose text needs escaping plus a gap, so both the provenance
+  // table and the explicit-holes section are exercised in every format.
+  const claims: Claim[] = [
+    {
+      ref: 1,
+      text: "3 deals closed in EMEA <this & that>",
+      source: { task: "deals", server: "crm", tool: "read_deals", argsHash: "abc123", at: "2026-08-17T00:00:00Z" },
+    },
+  ];
+  const gaps: Gap[] = [
+    { task: "issues", server: "jira", tool: "read_issues", reason: "call-failed", detail: "boom" },
+  ];
+  const input = { goal: "quarterly", title: "Quarterly <Q>", claims, gaps, generatedAt: "2026-08-17T00:00:00Z" };
+
+  it("markdown keeps every claim, gap, and provenance entry (source of truth)", () => {
+    const md = renderMarkdownReport(input);
+    expect(md).toContain("3 deals closed in EMEA <this & that>");
+    expect(md).toContain("jira/read_issues");
+    expect(md).toContain("call failed");
+    expect(md).toContain("`crm`");
+    expect(md).toContain("`read_deals`");
+    expect(md).toContain("abc123");
+  });
+
+  it("html keeps every claim, gap, and provenance entry (same content, new presentation)", () => {
+    const html = renderHtmlReport(input);
+    expect(html).toContain("<!DOCTYPE html>");
+    // Claim text is preserved but escaped for the HTML context.
+    expect(html).toContain("3 deals closed in EMEA &lt;this &amp; that&gt;");
+    expect(html).not.toContain("<this & that>");
+    // The provenance table carries the same source data.
+    expect(html).toContain("crm");
+    expect(html).toContain("read_deals");
+    expect(html).toContain("abc123");
+    // Gaps are explicit, never smoothed over.
+    expect(html).toContain("jira/read_issues");
+    expect(html).toContain("call failed");
+    expect(html).toContain("boom");
+    // The title is escaped too.
+    expect(html).toContain("Quarterly &lt;Q&gt;");
+  });
+
+  it("renderReport dispatches to the right renderer per format", () => {
+    expect(renderReport("markdown", input)).toBe(renderMarkdownReport(input));
+    expect(renderReport("html", input)).toBe(renderHtmlReport(input));
+  });
+
+  it("reportFormatExtension maps each supported format to its file extension", () => {
+    expect(reportFormatExtension("markdown")).toBe(".md");
+    expect(reportFormatExtension("html")).toBe(".html");
+    // The dispatcher only knows the implemented formats.
+    expect(REPORT_FORMATS).toEqual(["markdown", "html"]);
+  });
+});
+
 describe("Write gate (Q6)", () => {
   it("ReadOnlyGate refuses every write", () => {
     const gate = new ReadOnlyGate();
@@ -471,6 +534,102 @@ describe("Orchestrator: end-to-end with report writing", () => {
     expect(result.reportPath).toBe(path.join(dir, "emea.md"));
     expect(await readFile(path.join(dir, "emea.md"), "utf8")).toContain("# EMEA Deals");
     expect(events.some((e) => e.type === "report-writing")).toBe(true);
+
+    await manager.close();
+    for (const s of servers) await s.close();
+    servers = [];
+  });
+
+  it("renders and writes an HTML report when reportFormat is html (issue #14)", async () => {
+    const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }]);
+    servers = [crm];
+    const manager = new McpClientManager(
+      [serverConfig("crm", ["read_deals"])],
+      resolver,
+      guard,
+      { retry: instantRetry, transportFactory: () => crm.transport },
+    );
+    await manager.connectAll();
+
+    const audit = new InMemoryAuditLogger();
+    const orch = new Orchestrator({
+      manager,
+      audit,
+      reportFormat: "html",
+      writeReport: async (content, file) => {
+        const { writeFile } = await import("node:fs/promises");
+        const abs = path.join(dir, file);
+        await writeFile(abs, content);
+        return abs;
+      },
+    });
+
+    // No explicit file: the default name takes the format's extension (.html).
+    const result = await orch.run({
+      goal: "deals report",
+      gather: [{ id: "deals", server: "crm", tool: "read_deals", args: { region: "emea" } }],
+      report: { title: "EMEA Deals" },
+    });
+
+    expect(result.reportPath).toMatch(/\.html$/);
+    const onDisk = await readFile(result.reportPath!, "utf8");
+    // The HTML view carries the claim text and its provenance.
+    expect(onDisk).toContain("<!DOCTYPE html>");
+    expect(onDisk).toContain("EMEA Deals");
+    expect(onDisk).toContain("crm");
+    expect(onDisk).toContain("read_deals");
+    expect(onDisk).toContain("Provenance");
+    // The claim text (the tool's JSON echo) survives the transform; in HTML the
+    // double quotes are escaped to &quot; — the substance is unchanged.
+    const claimText = JSON.stringify({ region: "emea" });
+    expect(onDisk).toContain(claimText.replace(/"/g, "&quot;"));
+
+    await manager.close();
+    for (const s of servers) await s.close();
+    servers = [];
+  });
+
+  it("createOrchestrator writes an HTML report through the real File Manager (FM-08 accepts .html)", async () => {
+    const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }]);
+    servers = [crm];
+    const manager = new McpClientManager(
+      [serverConfig("crm", ["read_deals"])],
+      resolver,
+      guard,
+      { retry: instantRetry, transportFactory: () => crm.transport },
+    );
+    await manager.connectAll();
+
+    const files = new FileManager({
+      confinement: new PathConfinement([dir]),
+      policy: {
+        confirmation_required: ["delete", "overwrite"],
+        undo_depth: 0,
+        dry_run_default: false,
+        audit_payload_logging: false,
+        ignore_patterns: [],
+      },
+    });
+    const audit = new InMemoryAuditLogger();
+    const orch = createOrchestrator({
+      manager,
+      audit,
+      files,
+      reportDir: dir,
+      reportFormat: "html",
+    });
+
+    const result = await orch.run({
+      goal: "deals report",
+      gather: [{ id: "deals", server: "crm", tool: "read_deals", args: { region: "emea" } }],
+      report: { title: "EMEA Deals" },
+    });
+
+    expect(result.reportError).toBeUndefined();
+    expect(result.reportPath).toMatch(/\.html$/);
+    const onDisk = await readFile(result.reportPath!, "utf8");
+    expect(onDisk).toContain("<!DOCTYPE html>");
+    expect(onDisk).toContain("EMEA Deals");
 
     await manager.close();
     for (const s of servers) await s.close();
