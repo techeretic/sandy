@@ -35,9 +35,22 @@
 #       run is `sandy ask` (parse -> run -> narrate) instead of `sandy run`.
 #       Proves the no-egress / cross-sandbox guarantees hold WITH the in-
 #       sandbox loopback model (SD-05/06 at the security level).
+#   SANDY_REAL_MODEL=<gguf> OPT-IN real-model conformance leg (issue #17):
+#       runs `sandy ask` against a REAL provisioned GGUF (docs/MODEL.md)
+#       inside a no-egress Firejail jail. The stub-model leg above proves the
+#       PATH; this leg proves a real model actually plans and narrates inside
+#       the boundary (manually proven 2026-08-22, DIARY). CI stays green with
+#       no model present: the leg is SKIPPED (not failed) unless
+#       SANDY_REAL_MODEL is set AND the file exists (plus the llama-server
+#       runtime resolvable). The real model proposes its own plan/args, so the
+#       asserts are on invariants that hold for ANY legal plan of the fixture
+#       (provenance-tracked crm/read_deals claim + legal plan + audited model
+#       calls + no orphan), not on the stub's canned values.
 #
 # Run:  npm run conformance:sandbox
 #   (or: bash conformance/sandbox-matrix.sh; standalone: SANDY_MODE=standalone)
+#   Real-model leg: SANDY_REAL_MODEL=~/.local/share/sandy/models/<x>.gguf \
+#     bash conformance/sandbox-matrix.sh
 
 set -euo pipefail
 
@@ -234,6 +247,84 @@ if want_firejail; then
 
     assert_behavior "firejail" "$OUT/firejail.check.json" "$OUT/firejail.run.json" "$WS_FJ"
     log "Firejail boundary: PASS (check ok, ${SANDY_MODE} run produced a confined provenance-tracked report)"
+  fi
+fi
+
+# ---------------------------- REAL MODEL (opt-in) ---------------------------
+# Issue #17: the stub-model leg above proves the loop PATH with a deterministic
+# stand-in; this leg proves a REAL provisioned GGUF plans and narrates inside a
+# no-egress boundary. It is deliberately Firejail-only: a 2.4GB GGUF must not
+# be baked into or mounted into the CI Docker image (the Docker legs stay
+# stub-based in CI), and the manual proof (DIARY 2026-08-22) ran in exactly
+# this shape — `firejail --net=none` around the whole CLI + in-jail model.
+#
+# Skipped (never failed) unless opted in: SANDY_REAL_MODEL must be set, the
+# file must exist, and the llama-server runtime must be resolvable — CI (which
+# has no model) therefore stays green on the default path.
+REAL_MODEL="${SANDY_REAL_MODEL:-}"
+if [ -n "$REAL_MODEL" ]; then
+  if [ ! -f "$REAL_MODEL" ]; then
+    warn "real-model leg: SANDY_REAL_MODEL is set but $REAL_MODEL does not exist; skipping"
+  elif ! have_firejail; then
+    warn "real-model leg: firejail is not installed; skipping"
+  else
+    LLM_CMD="${SANDY_LLM_SERVER:-$HOME/.local/share/sandy/llama.cpp/llama-server}"
+    if [ ! -x "$LLM_CMD" ]; then
+      warn "real-model leg: llama-server runtime not found at $LLM_CMD (provision via scripts/provision-model.sh, or point SANDY_LLM_SERVER at it); skipping"
+    else
+      ran_any=1
+      NODE_BIN="${NODE_BIN:-$(command -v node)}"
+      WS_RM="$(mktemp -d /tmp/sandy-ws-rm-XXXXXX)"
+      mkdir -p "$WS_RM/reports"
+      cat > "$WS_RM/mcp-servers.json" <<JSON
+{ "servers": [ { "name": "crm", "transport": "stdio",
+  "command": ["${NODE_BIN}", "${ROOT}/conformance/stdio-server.mjs"],
+  "version": "1.0.0", "capabilities": ["read_deals"], "allowed_tools": ["read_deals"] } ] }
+JSON
+      cat > "$WS_RM/sandy.json" <<JSON
+{ "mode": "standalone",
+  "llm": { "provider": "local", "model": "real-conformance", "model_path": "${REAL_MODEL}",
+    "engine": { "type": "llama-server", "command": ["${LLM_CMD}"], "host": "127.0.0.1", "port": 0 } },
+  "sandbox": { "runtime": "firejail", "allowed_paths": ["${WS_RM}"],
+    "allowed_network": [], "max_memory_mb": 512, "max_cpu_percent": 25 },
+  "mcp_servers": "./mcp-servers.json", "report_output_dir": "./reports",
+  "policy": { "confirmation_required": ["delete","overwrite"], "undo_depth": 5,
+    "dry_run_default": false, "audit_payload_logging": false, "ignore_patterns": [] } }
+JSON
+      run_rm() { firejail --quiet --net=none -- "$NODE_BIN" bin/sandy.js "$@"; }
+
+      log "Real model: sandy check (firejail, no external egress)"
+      set +e
+      run_rm check --config "$WS_RM/sandy.json" --no-progress --json > "$OUT/rm.check.json" 2> "$OUT/rm.check.err"
+      RC_CHECK=$?
+      set -e
+      [ "$RC_CHECK" -eq 0 ] || { cat "$OUT/rm.check.err"; fail "real-model check exited ${RC_CHECK}"; }
+
+      log "Real model: sandy ask (firejail, no external egress) — $REAL_MODEL"
+      set +e
+      run_rm ask "$ASK_GOAL" --config "$WS_RM/sandy.json" --no-progress --json > "$OUT/rm.ask.json" 2> "$OUT/rm.ask.err"
+      RC_ASK=$?
+      set -e
+      [ "$RC_ASK" -eq 0 ] || { cat "$OUT/rm.ask.err"; fail "real-model ask exited ${RC_ASK}"; }
+
+      # A REAL model proposes its own plan and args, so the asserts are on the
+      # invariants that hold for ANY legal plan of this fixture — provenance,
+      # legality, audit, process hygiene — not on the stub's canned values.
+      grep -q '"ok": true'        "$OUT/rm.check.json" || fail "[real-model] check did not report ok:true"
+      grep -q '"degraded": false' "$OUT/rm.check.json" || fail "[real-model] check reported a degraded (reduced) sandbox"
+      grep -q '"crm"'             "$OUT/rm.check.json" || fail "[real-model] crm server did not connect"
+      grep -q '"source": "model"' "$OUT/rm.ask.json"   || fail "[real-model] plan did not come from the real model (fallback/refused: $(grep -o '"reason": *"[^"]*"' "$OUT/rm.ask.json" | head -1))"
+      grep -q '"crm"'             "$OUT/rm.ask.json"   || fail "[real-model] the real model's plan did not use the crm server"
+      grep -q '"read_deals"'      "$OUT/rm.ask.json"   || fail "[real-model] the real model's plan did not use read_deals"
+      grep -q '"2 deals closed in' "$OUT/rm.ask.json"  || fail "[real-model] run did not return a provenance-tracked claim"
+      grep -q '"argsHash"'        "$OUT/rm.ask.json"   || fail "[real-model] the claim is missing its argsHash provenance"
+      grep -q '"claims": \[\]'    "$OUT/rm.ask.json"   && fail "[real-model] no claims were produced"
+      ls "$WS_RM/reports" | grep -q '\.md' || fail "[real-model] no report was written to the confined reports dir"
+      # Every model call (parse + narrate) is audited (AU-01).
+      grep -q '"standalone_narrate"' "$OUT/rm.ask.json" || fail "[real-model] the narrate step was not audited"
+      rm -rf "$WS_RM"
+      log "Real-model leg: PASS (a real GGUF planned + narrated inside a no-egress jail, provenance-tracked report, no orphan)"
+    fi
   fi
 fi
 
