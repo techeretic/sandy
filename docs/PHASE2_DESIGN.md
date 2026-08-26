@@ -495,14 +495,19 @@ service adds a REST surface for a UI / other local tools.
    this model (Vulkan/GPU on an RTX 5090, in-sandbox, zero egress) produced a
    model-planned run, a provenance-tracked report, and a labeled narrative.
    See `docs/MODEL.md`.
-3. **Resource-limit enforcement scope (§4.5)** → **map caps to real levers now;
-   the hard ceiling is the service manager's cgroup.** `sandbox.max_cpu_percent`
-   is mapped to a llama.cpp `--threads` budget for the local model
-   (`threadsForCpuPercent` in `src/engine.ts`, wired in `createSandy`); a cap of
-   100 passes no flag (no effective limit), any lower value reduces the budget
-   (tighten-never-loosen). The hard memory ceiling is the supervisor's cgroup
-   (`memory.max` / `--memory` / `MemoryMax=`). An in-service hard bound remains
-   an explicit flagged addition if wanted.
+   3. **Resource-limit enforcement scope (§4.5)** → **map caps to real levers now;
+    the hard ceiling is the service manager's cgroup; opt-in in-service bound
+    (issue #18).** `sandbox.max_cpu_percent` is mapped to a llama.cpp `--threads`
+    budget for the local model (`threadsForCpuPercent` in `src/engine.ts`, wired
+    in `createSandy`); a cap of 100 passes no flag (no effective limit), any
+    lower value reduces the budget (tighten-never-loosen). The DEFAULT hard
+    memory ceiling is the supervisor's cgroup (`memory.max` / `--memory` /
+    `MemoryMax=`). The flagged in-service addition is now implemented:
+    `sandbox.enforce_memory_limit: true` (default off) wraps the model's process
+    group in a cgroup v2 child with `memory.max` = `max_memory_mb`
+    (`wrapProcessInMemoryCgroup` in `src/memory-bound.ts`). It requires cgroup
+    delegation and fails closed (a degraded engine) where it can't be applied —
+    never silently unbounded.
 
 **Resolved by implementation (2026-08-22):**
 - **#5 (old) REST vs CLI emphasis** → both ship, as the design leaned: the CLI
@@ -584,8 +589,10 @@ service adds a REST surface for a UI / other local tools.
 - Recurring report templates (RG-08) — still deferred.
 - Multi-turn agentic planning beyond the single gather→report pass.
 - Multi-user / network-exposed API (one instance per user, loopback only).
-- (Conditionally) a hard in-service memory ceiling for the model, if the team
-  defers that to the service manager (§4.5).
+- ~~A hard in-service memory ceiling for the model, if the team defers that to
+  the service manager (§4.5)~~ — now implemented as an opt-in
+  (`sandbox.enforce_memory_limit`, issue #18); the default ceiling remains the
+  service manager's cgroup.
 
 ## 11. Risks & mitigations
 

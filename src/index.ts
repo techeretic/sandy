@@ -176,6 +176,7 @@ export {
   RemoteEngine,
   StubEngine,
   type CreateLlmEngineOptions,
+  type EngineMemoryStatus,
   type EngineState,
   type EngineStatus,
   type LlamaCppEngineOptions,
@@ -186,6 +187,14 @@ export {
   type RemoteEngineOptions,
   type StubEngineOptions,
 } from "./engine.js";
+export {
+  MemoryBoundError,
+  defaultMemoryBoundOps,
+  releaseMemoryCgroup,
+  wrapProcessInMemoryCgroup,
+  type MemoryBoundOps,
+  type MemoryBoundResult,
+} from "./memory-bound.js";
 export {
   AutonomousLoop,
   NoModelEngineError,

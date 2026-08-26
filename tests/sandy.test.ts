@@ -60,6 +60,9 @@ async function writeConfig(
     llm?: Record<string, unknown>;
     mode?: string;
     maxCpuPercent?: number;
+    maxMemoryMb?: number;
+    /** The in-service memory bound opt-in (issue #18). */
+    enforceMemoryLimit?: boolean;
     preferences?: Record<string, unknown>;
     /** A template registry (issue #15), written to templates.json + wired in. */
     templates?: Record<string, unknown>;
@@ -86,8 +89,11 @@ async function writeConfig(
       runtime: opts.runtime ?? "custom",
       allowed_paths: opts.allowedPaths,
       allowed_network: [],
-      max_memory_mb: 512,
+      max_memory_mb: opts.maxMemoryMb ?? 512,
       max_cpu_percent: opts.maxCpuPercent ?? 25,
+      ...(opts.enforceMemoryLimit !== undefined
+        ? { enforce_memory_limit: opts.enforceMemoryLimit }
+        : {}),
     },
     mcp_servers: "./mcp-servers.json",
     report_output_dir: "./reports",
@@ -534,6 +540,138 @@ describe("createSandy: engine wiring (PRD §7)", () => {
       expect(spawnArgs[i + 1]).toBe(
         String(Math.max(1, Math.floor((cpusCount * 25) / 100))),
       );
+    } finally {
+      await closeAll([sandy]);
+    }
+  });
+
+  it("opts the local engine into an in-service memory bound when enforce_memory_limit is set (issue #18)", async () => {
+    const ws = await tmpWorkspace();
+    const modelPath = fileURLToPath(new URL("../package.json", import.meta.url));
+    const child = {
+      pid: 7777,
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      on: (() => child) as any,
+      once: (() => child) as any,
+      kill: () => {
+        child.stderr.emit("close");
+        return true;
+      },
+      exitCode: null,
+      signalCode: null,
+    };
+    const cfg = await writeConfig(ws, {
+      allowedPaths: [ws],
+      mode: "standalone",
+      enforceMemoryLimit: true,
+      maxMemoryMb: 1024,
+      llm: {
+        provider: "local",
+        model: "test-model",
+        model_path: modelPath,
+        engine: { host: "127.0.0.1", port: 9999 }, // fixed port -> no discovery needed
+      },
+    });
+    const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }]);
+    inMemServers.push(crm);
+    const fetchImpl = (async (url: string) =>
+      url.includes("/health")
+        ? new Response("ok", { status: 200 })
+        : new Response(
+            JSON.stringify({
+              choices: [{ message: { content: "{}" } }],
+              usage: { prompt_tokens: 1, completion_tokens: 1 },
+            }),
+            { status: 200 },
+          )) as typeof fetch;
+    let seen: { pid?: number; limitBytes?: number } = {};
+    const sandy = await createSandy({
+      sandyPath: cfg,
+      transportFactory: () => crm.transport,
+      detection: pinnedDetection,
+      engineSpawn: () => child as any,
+      engineFetch: fetchImpl,
+      // The real cgroup factory needs delegation; inject one that records the
+      // config-provided cap so we can assert the wiring end-to-end.
+      engineMemoryBoundFactory: (pid, limitBytes) => {
+        seen = { pid, limitBytes };
+        return { cgroupPath: "/cg/sandy-model-test", limitBytes };
+      },
+    });
+    try {
+      expect(sandy.engine.provider).toBe("local");
+      await sandy.engine.start();
+      // The declared max_memory_mb (MiB) reached the cgroup factory in BYTES,
+      // for the spawned model pid — config -> engine -> enforcement is wired.
+      expect(seen.limitBytes).toBe(1024 * 1024 * 1024);
+      expect(seen.pid).toBe(7777);
+      expect(sandy.check().engine.memory).toEqual({
+        enforced: true,
+        limitBytes: 1024 * 1024 * 1024,
+        cgroup: "/cg/sandy-model-test",
+      });
+    } finally {
+      await closeAll([sandy]);
+    }
+  });
+
+  it("does NOT opt the local engine into a memory bound when enforce_memory_limit is unset (default off, issue #18)", async () => {
+    const ws = await tmpWorkspace();
+    const modelPath = fileURLToPath(new URL("../package.json", import.meta.url));
+    const child = {
+      pid: 7777,
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      on: (() => child) as any,
+      once: (() => child) as any,
+      kill: () => {
+        child.stderr.emit("close");
+        return true;
+      },
+      exitCode: null,
+      signalCode: null,
+    };
+    const cfg = await writeConfig(ws, {
+      allowedPaths: [ws],
+      mode: "standalone",
+      llm: {
+        provider: "local",
+        model: "test-model",
+        model_path: modelPath,
+        engine: { host: "127.0.0.1", port: 9999 },
+      },
+    });
+    const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }]);
+    inMemServers.push(crm);
+    const fetchImpl = (async (url: string) =>
+      url.includes("/health")
+        ? new Response("ok", { status: 200 })
+        : new Response(
+            JSON.stringify({
+              choices: [{ message: { content: "{}" } }],
+              usage: { prompt_tokens: 1, completion_tokens: 1 },
+            }),
+            { status: 200 },
+          )) as typeof fetch;
+    let factoryCalled = false;
+    const sandy = await createSandy({
+      sandyPath: cfg,
+      transportFactory: () => crm.transport,
+      detection: pinnedDetection,
+      engineSpawn: () => child as any,
+      engineFetch: fetchImpl,
+      engineMemoryBoundFactory: () => {
+        factoryCalled = true;
+        throw new Error("should not be called when the bound is off");
+      },
+    });
+    try {
+      expect(sandy.engine.provider).toBe("local");
+      await sandy.engine.start();
+      // The default is unchanged: no cgroup is touched, no memory bound reported.
+      expect(factoryCalled).toBe(false);
+      expect(sandy.check().engine.memory).toBeUndefined();
     } finally {
       await closeAll([sandy]);
     }
