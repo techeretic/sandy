@@ -125,11 +125,19 @@ is the service manager's cgroup.**
   in `createSandy`). A cap of `100` means "no effective limit" (no flag passed,
   llama.cpp keeps its default); any lower value **reduces** the thread budget
   (tighten-never-loosen). The host/remote engines ignore it.
-- **Memory (hard ceiling):** the *hard* memory bound is the **service manager's
-  cgroup** (`memory.max` / Docker `--memory` / `systemd` `MemoryMax=`). Sandy
-  sets the soft knobs; the supervisor enforces the ceiling. This is documented,
-  not silently unbounded. (An in-service hard bound remains an explicit,
-  flagged addition if the team wants it.)
+- **Memory (hard ceiling):** the *default* hard memory bound is the **service
+  manager's cgroup** (`memory.max` / Docker `--memory` / `systemd`
+  `MemoryMax=`). Sandy sets the soft knobs; the supervisor enforces the ceiling.
+  **Opt-in in-service hard bound (issue #18):** set
+  `sandbox.enforce_memory_limit: true` to make Sandy enforce the ceiling
+  itself — the model's process group is wrapped in a cgroup v2 child whose
+  `memory.max` is `sandbox.max_memory_mb` (`wrapProcessInMemoryCgroup` in
+  `src/memory-bound.ts`, wired in `createSandy`). This requires cgroup v2
+  **delegation** (a systemd scope/service with `Delegate=yes`); in a boundary
+  without it (e.g. the stock Docker conformance image, where the cgroup fs is
+  read-only) the engine **fails closed** (degraded) rather than run a model the
+  operator asked to cap without the cap. Default off, so the documented
+  supervisor-cgroup ceiling is the behavior unless opted in.
 
 ## Where things live
 

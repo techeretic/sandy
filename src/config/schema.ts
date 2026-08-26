@@ -214,6 +214,14 @@ const sandboxSchema = z
     allowed_network: z.array(endpointSchema).default([]),
     max_memory_mb: z.number().int().positive(),
     max_cpu_percent: z.number().int().min(1).max(100),
+    /**
+     * Opt-in in-service HARD memory bound for the bundled model (issue #18,
+     * design §4.5): wrap the model's process group in a cgroup v2 child whose
+     * memory.max is max_memory_mb. Default false — the ceiling stays the
+     * service manager's cgroup. When true and the bound cannot be applied
+     * (no cgroup delegation), the model engine fails closed (degraded).
+     */
+    enforce_memory_limit: z.boolean().default(false),
   })
   .strict();
 

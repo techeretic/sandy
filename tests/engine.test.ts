@@ -47,6 +47,8 @@ class FakeChild {
   };
   readonly exitCode: number | null = null;
   readonly signalCode: NodeJS.Signals | null = null;
+  /** The child's pid (the engine uses it to attach a memory bound). */
+  readonly pid = 4242;
   private readonly em = new EventEmitter();
   killedSignals: string[] = [];
   private readonly stdoutEm = new EventEmitter();
@@ -303,6 +305,118 @@ describe("LlamaCppEngine (local, in-sandbox loopback)", () => {
     expect(argv[i + 1]).toBe("4");
     await e.close();
   });
+
+  it("wraps the model's pid in a memory-bounded cgroup when enforceMemoryLimit is set (§4.5 / issue #18)", async () => {
+    const child = new FakeChild(["Server listening at http://127.0.0.1:8081"]);
+    const fake = fakeFetch((url) =>
+      url.endsWith("/health") ? new Response("ok", { status: 200 }) : completionResponse("{}", 1, 1),
+    );
+    let boundPid: number | undefined;
+    let boundLimit: number | undefined;
+    let released = false;
+    const e = new LlamaCppEngine({
+      audit: audit(),
+      modelPath: EXISTING_FILE,
+      model: "m",
+      enforceMemoryLimit: true,
+      maxMemoryMb: 512,
+      memoryBoundFactory: (pid, limitBytes) => {
+        boundPid = pid;
+        boundLimit = limitBytes;
+        return { cgroupPath: "/cg/sandy-model-model", limitBytes };
+      },
+      memoryBoundOps: {
+        readFileSync: () => {
+          throw new Error("unused");
+        },
+        writeFileSync: () => {},
+        existsSync: () => false,
+        mkdirSync: () => {},
+        rmdirSync: () => {
+          released = true;
+        },
+      },
+      spawnFactory: () => {
+        child.emitReady();
+        return child.asChild();
+      },
+      fetchImpl: fake.fn,
+      logSink: () => {},
+    });
+    await e.start();
+    expect(e.status().status).toBe("ready");
+    // The bound was applied to the spawned pid, with the cap in bytes.
+    expect(boundPid).toBe(4242);
+    expect(boundLimit).toBe(512 * 1024 * 1024);
+    // status() reports the enforced bound (feeds check()).
+    expect(e.status().memory).toEqual({
+      enforced: true,
+      limitBytes: 512 * 1024 * 1024,
+      cgroup: "/cg/sandy-model-model",
+    });
+    // close() releases the bound cgroup (no leak) and clears the enforced state.
+    await e.close();
+    expect(released).toBe(true);
+    expect(e.status().memory?.enforced).toBe(false);
+  });
+
+  it("fails closed (degraded, child killed) when the requested memory bound cannot be applied (issue #18)", async () => {
+    const child = new FakeChild(["Server listening at http://127.0.0.1:8081"]);
+    const fake = fakeFetch((url) =>
+      url.endsWith("/health") ? new Response("ok", { status: 200 }) : completionResponse("{}", 1, 1),
+    );
+    const e = new LlamaCppEngine({
+      audit: audit(),
+      modelPath: EXISTING_FILE,
+      model: "m",
+      enforceMemoryLimit: true,
+      maxMemoryMb: 512,
+      memoryBoundFactory: () => {
+        throw new Error("no cgroup v2 ancestor has the memory controller delegated");
+      },
+      spawnFactory: () => {
+        child.emitReady();
+        return child.asChild();
+      },
+      fetchImpl: fake.fn,
+      logSink: () => {},
+    });
+    await expect(e.start()).rejects.toThrow(/memory bound.*fail-closed/i);
+    // A requested hard ceiling that cannot be applied is a reported degraded
+    // state — the model is NOT left running unbounded (the operator asked to cap it).
+    expect(e.status().status).toBe("degraded");
+    expect(e.status().memory?.enforced).toBe(false);
+    expect(child.killedSignals).toContain("SIGTERM");
+    await e.close();
+  });
+
+  it("does not touch the cgroup at all when enforceMemoryLimit is off (default unchanged, issue #18)", async () => {
+    const child = new FakeChild(["Server listening at http://127.0.0.1:8081"]);
+    const fake = fakeFetch((url) =>
+      url.endsWith("/health") ? new Response("ok", { status: 200 }) : completionResponse("{}", 1, 1),
+    );
+    let factoryCalled = false;
+    const e = new LlamaCppEngine({
+      audit: audit(),
+      modelPath: EXISTING_FILE,
+      model: "m",
+      memoryBoundFactory: () => {
+        factoryCalled = true;
+        throw new Error("should not be called");
+      },
+      spawnFactory: () => {
+        child.emitReady();
+        return child.asChild();
+      },
+      fetchImpl: fake.fn,
+      logSink: () => {},
+    });
+    await e.start();
+    expect(e.status().status).toBe("ready");
+    expect(factoryCalled).toBe(false);
+    expect(e.status().memory).toBeUndefined();
+    await e.close();
+  });
 });
 
 describe("threadsForCpuPercent (§4.5: CPU cap -> thread budget)", () => {
@@ -407,5 +521,36 @@ describe("createLlmEngine (factory)", () => {
         { guard: new NetworkGuard(["m:1"]) },
       ).provider,
     ).toBe("remote");
+  });
+
+  it("passes the in-service memory bound through to the local engine (issue #18)", async () => {
+    const child = new FakeChild(["Server listening at http://127.0.0.1:8081"]);
+    const fake = fakeFetch((url) =>
+      url.endsWith("/health") ? new Response("ok", { status: 200 }) : completionResponse("{}", 1, 1),
+    );
+    let seen: { pid?: number; limitBytes?: number } = {};
+    const e = createLlmEngine(
+      { provider: "local", model: "m", model_path: EXISTING_FILE } as LlmConfig,
+      audit(),
+      {
+        enforceMemoryLimit: true,
+        maxMemoryMb: 2048,
+        memoryBoundFactory: (pid, limitBytes) => {
+          seen = { pid, limitBytes };
+          return { cgroupPath: "/cg", limitBytes };
+        },
+        spawnFactory: () => {
+          child.emitReady();
+          return child.asChild();
+        },
+        fetchImpl: fake.fn,
+      },
+    );
+    await e.start();
+    // The config-provided MiB cap reached the cgroup factory in BYTES for the
+    // spawned pid — the seam wires the cap through to the enforcement point.
+    expect(seen.limitBytes).toBe(2048 * 1024 * 1024);
+    expect(seen.pid).toBe(4242);
+    await e.close();
   });
 });

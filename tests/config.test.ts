@@ -84,6 +84,42 @@ describe("loadSandyConfig", () => {
     }
   });
 
+  it("sandbox.enforce_memory_limit defaults to false and accepts true (issue #18)", async () => {
+    const { dir, sandyPath } = await makeFixture(validMain, validManifest);
+    try {
+      const loaded = await loadSandyConfig(sandyPath, env);
+      expect(loaded.config.sandbox.enforce_memory_limit).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+
+    const main = {
+      ...validMain,
+      sandbox: { ...validMain.sandbox, enforce_memory_limit: true },
+    };
+    const fixture = await makeFixture(main, validManifest);
+    try {
+      const loaded = await loadSandyConfig(fixture.sandyPath, env);
+      expect(loaded.config.sandbox.enforce_memory_limit).toBe(true);
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed on a non-boolean sandbox.enforce_memory_limit (strict, issue #18)", async () => {
+    const main = {
+      ...validMain,
+      sandbox: { ...validMain.sandbox, enforce_memory_limit: "yes" },
+    };
+    const { dir, sandyPath } = await makeFixture(main, validManifest);
+    try {
+      const result = await loadSandyConfig(sandyPath, env).catch((e) => e);
+      expect(result).toBeInstanceOf(ConfigError);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("narrowed reportFormat: markdown is the default, html is accepted (issue #14)", async () => {
     const { dir, sandyPath } = await makeFixture(validMain, validManifest);
     try {

@@ -73,6 +73,9 @@ export interface SandyDeps {
   engineFetch?: import("@modelcontextprotocol/sdk/shared/transport.js").FetchLike;
   /** Injectable spawn for a constructed local engine (tests). */
   engineSpawn?: (argv: string[], opts: { stdio: ["ignore", "pipe", "pipe"] }) => import("node:child_process").ChildProcess;
+  /** Injectable cgroup factory for the local engine's in-service memory bound
+   *  (issue #18, tests — the real factory needs cgroup delegation). */
+  engineMemoryBoundFactory?: import("./engine.js").LlamaCppEngineOptions["memoryBoundFactory"];
   /** MCP retry policy overrides. */
   retry?: Partial<RetryPolicy>;
   /** Per-request MCP timeout (ms). */
@@ -244,14 +247,24 @@ export async function createSandy(deps: SandyDeps): Promise<Sandy> {
     llm.provider === "local" && cpuPercent < 100
       ? threadsForCpuPercent(cpuPercent, cpus().length)
       : undefined;
+  // §4.5 / issue #18: the OPT-IN in-service hard memory bound. Only the LOCAL
+  // (bundled) engine has a process group to wrap; the declared max_memory_mb is
+  // the ceiling. Default (flag unset/false) leaves the hard ceiling with the
+  // service manager's cgroup — the behavior is unchanged.
+  const enforceMemoryLimit =
+    llm.provider === "local" && loaded.config.sandbox.enforce_memory_limit === true;
+  const modelMaxMemoryMb = enforceMemoryLimit ? loaded.config.sandbox.max_memory_mb : undefined;
   const engine =
     deps.engine ??
     createLlmEngine(llm, audit, {
       guard,
       bearerToken,
       maxThreads: modelMaxThreads,
+      enforceMemoryLimit,
+      maxMemoryMb: modelMaxMemoryMb,
       fetchImpl: deps.engineFetch,
       spawnFactory: deps.engineSpawn,
+      memoryBoundFactory: deps.engineMemoryBoundFactory,
     });
 
   // 4. MCP fleet (MCP-03/04/10).

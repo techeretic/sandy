@@ -4,6 +4,13 @@ import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { LlmConfig } from "./config/schema.js";
 import { logModelInvocation, type AuditEvent, type AuditLogger } from "./audit/logger.js";
 import type { NetworkGuard } from "./sandbox/network.js";
+import {
+  defaultMemoryBoundOps,
+  releaseMemoryCgroup,
+  wrapProcessInMemoryCgroup,
+  type MemoryBoundOps,
+  type MemoryBoundResult,
+} from "./memory-bound.js";
 
 /**
  * The LLM Engine — the reasoning layer (PRD §7: "either the bundled local model
@@ -29,6 +36,19 @@ import type { NetworkGuard } from "./sandbox/network.js";
 
 export type EngineState = "not-started" | "starting" | "ready" | "degraded";
 
+/** The in-service memory bound applied to a local model's process group
+ *  (issue #18). Absent when no bound is configured or it did not take effect. */
+export interface EngineMemoryStatus {
+  /** True when the model's process group is confined to `limitBytes`. */
+  enforced: boolean;
+  /** The enforced ceiling, in bytes (present when enforced). */
+  limitBytes?: number;
+  /** The cgroup the model was moved into (present when enforced). */
+  cgroup?: string;
+  /** Present when a bound was requested but could not be applied. */
+  error?: string;
+}
+
 /** A health snapshot for `SandyCheckReport.engine`. */
 export interface EngineStatus {
   status: EngineState;
@@ -38,6 +58,8 @@ export interface EngineStatus {
   model?: string;
   /** Bound loopback port, for a local server once started. */
   port?: number;
+  /** The in-service memory bound on the model's process group (issue #18). */
+  memory?: EngineMemoryStatus;
 }
 
 /**
@@ -226,6 +248,21 @@ export interface LlamaCppEngineOptions {
    * Undefined = let llama.cpp pick.
    */
   maxThreads?: number;
+  /**
+   * Enforce a HARD in-service memory bound on the model's process group
+   * (issue #18, design §4.5): wrap the model's pid in a cgroup v2 child whose
+   * `memory.max` is `maxMemoryMb`. Default false — the ceiling stays the
+   * service manager's cgroup. When true and the bound cannot be applied (no
+   * cgroup delegation), the engine fails closed (degraded) rather than run an
+   * unbounded model the operator asked to cap.
+   */
+  enforceMemoryLimit?: boolean;
+  /** The memory ceiling in MiB, used when `enforceMemoryLimit` is true. */
+  maxMemoryMb?: number;
+  /** Injectable for tests: the cgroup factory. Default creates a real cgroup. */
+  memoryBoundFactory?: (pid: number, limitBytes: number) => MemoryBoundResult;
+  /** Injectable for tests: the cgroup fs ops. Default uses the real cgroupfs. */
+  memoryBoundOps?: MemoryBoundOps;
   /** Injectable for tests: a fake spawn. */
   spawnFactory?: (argv: string[], opts: { stdio: ["ignore", "pipe", "pipe"] }) => ChildProcess;
   /** Injectable for tests: a fake fetch. */
@@ -256,6 +293,10 @@ export class LlamaCppEngine implements LlmEngine {
   private readonly host: string;
   private readonly requestedPort: number;
   private readonly maxThreads?: number;
+  private readonly enforceMemoryLimit: boolean;
+  private readonly maxMemoryMb?: number;
+  private readonly memoryBoundFactory: (pid: number, limitBytes: number) => MemoryBoundResult;
+  private readonly memoryBoundOps: MemoryBoundOps;
   private readonly spawnFactory: (argv: string[], opts: { stdio: ["ignore", "pipe", "pipe"] }) => ChildProcess;
   private readonly fetchImpl: FetchLike;
   private readonly logSink: (chunk: string) => void;
@@ -270,6 +311,7 @@ export class LlamaCppEngine implements LlmEngine {
   private detail: string | undefined;
   private startPromise: Promise<void> | null = null;
   private closed = false;
+  private memory: EngineMemoryStatus | undefined;
 
   constructor(options: LlamaCppEngineOptions) {
     this.audit = options.audit;
@@ -279,6 +321,11 @@ export class LlamaCppEngine implements LlmEngine {
     this.host = options.host ?? "127.0.0.1";
     this.requestedPort = options.port ?? 0;
     this.maxThreads = options.maxThreads;
+    this.enforceMemoryLimit = options.enforceMemoryLimit ?? false;
+    this.maxMemoryMb = options.maxMemoryMb;
+    this.memoryBoundFactory =
+      options.memoryBoundFactory ?? ((pid, limitBytes) => wrapProcessInMemoryCgroup(pid, limitBytes, options.memoryBoundOps));
+    this.memoryBoundOps = options.memoryBoundOps ?? defaultMemoryBoundOps;
     this.spawnFactory =
       options.spawnFactory ?? ((argv, opts) => spawn(argv[0]!, argv.slice(1), opts));
     this.fetchImpl = options.fetchImpl ?? (globalThis.fetch as FetchLike);
@@ -325,6 +372,37 @@ export class LlamaCppEngine implements LlmEngine {
     }
     this.child = this.spawnFactory(argv, { stdio: ["ignore", "pipe", "pipe"] });
     const child = this.child;
+
+    // §4.5 / issue #18: the OPT-IN hard in-service memory bound. Wrap the model's
+    // pid in a cgroup v2 child with memory.max = the declared cap, immediately
+    // after spawn so the process is confined for its entire life (not just after
+    // it is ready). Fail closed: if the operator asked for a hard ceiling and it
+    // cannot be applied (no cgroup delegation), kill the child and degrade —
+    // never run an unbounded model the operator asked to cap.
+    if (this.enforceMemoryLimit) {
+      const limitBytes = this.maxMemoryMb
+        ? Math.round(this.maxMemoryMb * 1024 * 1024)
+        : undefined;
+      if (!limitBytes) {
+        await this.killChild();
+        throw new Error(
+          `enforce_memory_limit is set but no max_memory_mb value is available to bound the model (fail-closed)`,
+        );
+      }
+      if (child.pid === undefined || child.pid === null) {
+        await this.killChild();
+        throw new Error("model server has no pid; cannot apply the in-service memory bound (fail-closed)");
+      }
+      try {
+        const bound = this.memoryBoundFactory(child.pid, limitBytes);
+        this.memory = { enforced: true, limitBytes: bound.limitBytes, cgroup: bound.cgroupPath };
+      } catch (err) {
+        await this.killChild();
+        const msg = (err as Error).message;
+        this.memory = { enforced: false, limitBytes, error: msg };
+        throw new Error(`could not apply the in-service memory bound to the model (fail-closed): ${msg}`);
+      }
+    }
 
     child.on("error", (err) => {
       if (this.state === "ready" || this.state === "starting") {
@@ -430,6 +508,7 @@ export class LlamaCppEngine implements LlmEngine {
       status: this.state,
       model: this.model,
       ...(this.port ? { port: this.port } : {}),
+      ...(this.memory !== undefined ? { memory: this.memory } : {}),
       ...(this.detail ? { error: this.detail } : {}),
     };
   }
@@ -503,7 +582,10 @@ export class LlamaCppEngine implements LlmEngine {
   private async killChild(): Promise<void> {
     const child = this.child;
     this.child = null;
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    if (!child || child.exitCode !== null || child.signalCode !== null) {
+      this.releaseMemoryBound();
+      return;
+    }
     try {
       child.kill("SIGTERM");
       await new Promise<void>((resolve) => {
@@ -523,6 +605,22 @@ export class LlamaCppEngine implements LlmEngine {
     } catch {
       /* already dead */
     }
+    this.releaseMemoryBound();
+  }
+
+  /**
+   * Best-effort removal of the model's memory-bound cgroup once the child is
+   * gone (a cgroup can only be removed when empty). If it cannot be removed
+   * (the process has not fully reaped yet) the residual is surfaced via
+   * status().memory — it is never silently swallowed, and it cannot leak the
+   * model (the process is already dead). Idempotent.
+   */
+  private releaseMemoryBound(): void {
+    if (!this.memory?.enforced || !this.memory.cgroup) return;
+    const ok = releaseMemoryCgroup(this.memory.cgroup, this.memoryBoundOps);
+    this.memory = ok
+      ? { ...this.memory, cgroup: undefined, enforced: false }
+      : { ...this.memory, error: `residual memory-bound cgroup after close: ${this.memory.cgroup}` };
   }
 }
 
@@ -722,10 +820,18 @@ export interface CreateLlmEngineOptions {
   bearerToken?: string;
   /** Cap on the local model's CPU threads (§4.5); undefined = uncapped. */
   maxThreads?: number;
+  /** Enforce a hard in-service memory bound on the local model (issue #18). */
+  enforceMemoryLimit?: boolean;
+  /** The memory ceiling in MiB (used when enforceMemoryLimit is set). */
+  maxMemoryMb?: number;
   /** Injectable for tests: a fake fetch handed to a real engine. */
   fetchImpl?: FetchLike;
   /** Injectable for tests: a fake spawn handed to the local engine. */
   spawnFactory?: LlamaCppEngineOptions["spawnFactory"];
+  /** Injectable for tests: the cgroup factory handed to the local engine. */
+  memoryBoundFactory?: LlamaCppEngineOptions["memoryBoundFactory"];
+  /** Injectable for tests: the cgroup fs ops handed to the local engine. */
+  memoryBoundOps?: LlamaCppEngineOptions["memoryBoundOps"];
 }
 
 /**
@@ -753,6 +859,10 @@ export function createLlmEngine(
       host: engine?.host,
       port: engine?.port,
       maxThreads: options.maxThreads,
+      enforceMemoryLimit: options.enforceMemoryLimit,
+      maxMemoryMb: options.maxMemoryMb,
+      memoryBoundFactory: options.memoryBoundFactory,
+      memoryBoundOps: options.memoryBoundOps,
       spawnFactory: options.spawnFactory,
       fetchImpl: options.fetchImpl,
     });
