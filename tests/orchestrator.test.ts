@@ -8,6 +8,7 @@ import {
   McpClientManager,
   NetworkGuard,
   SecretResolver,
+  callSignature,
   captureTranscript,
   transcriptToMarkdown,
   renderMarkdownReport,
@@ -258,6 +259,21 @@ describe("Orchestrator: gaps (RG-05/06)", () => {
     await manager.close();
     for (const s of servers) await s.close();
     servers = [];
+  });
+});
+
+describe("callSignature (issue #19: re-gather de-duplication)", () => {
+  it("identifies the same call regardless of arg key order", () => {
+    expect(callSignature("crm", "read_deals", { region: "emea", limit: 10 })).toBe(
+      callSignature("crm", "read_deals", { limit: 10, region: "emea" }),
+    );
+  });
+
+  it("distinguishes different tools, servers, and args", () => {
+    const a = callSignature("crm", "read_deals", { region: "emea" });
+    expect(callSignature("crm", "read_contacts", { region: "emea" })).not.toBe(a);
+    expect(callSignature("jira", "read_deals", { region: "emea" })).not.toBe(a);
+    expect(callSignature("crm", "read_deals", { region: "apac" })).not.toBe(a);
   });
 });
 

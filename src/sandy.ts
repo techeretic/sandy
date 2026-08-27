@@ -322,6 +322,9 @@ export async function createSandy(deps: SandyDeps): Promise<Sandy> {
     reportFormat: loaded.reportFormat,
     tools: toolCatalog,
     onProgress: deps.onProgress,
+    // Multi-round planning (issue #19): 1 (default) keeps the single
+    // gather→report pass; >1 lets the model re-plan from the results.
+    maxPlanningRounds: preferences?.max_planning_rounds,
   });
 
   return {

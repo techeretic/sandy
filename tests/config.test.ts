@@ -142,6 +142,44 @@ describe("loadSandyConfig", () => {
     }
   });
 
+  it("preferences.max_planning_rounds defaults to 1 (single pass) and accepts a small int (issue #19)", async () => {
+    const { dir, sandyPath } = await makeFixture(validMain, validManifest);
+    try {
+      const loaded = await loadSandyConfig(sandyPath, env);
+      expect(loaded.config.preferences?.max_planning_rounds).toBe(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+
+    const main = {
+      ...validMain,
+      preferences: { ...validMain.preferences, max_planning_rounds: 3 },
+    };
+    const fixture = await makeFixture(main, validManifest);
+    try {
+      const loaded = await loadSandyConfig(fixture.sandyPath, env);
+      expect(loaded.config.preferences?.max_planning_rounds).toBe(3);
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed on an out-of-range preferences.max_planning_rounds (issue #19)", async () => {
+    for (const rounds of [0, 6, 1.5]) {
+      const main = {
+        ...validMain,
+        preferences: { ...validMain.preferences, max_planning_rounds: rounds },
+      };
+      const { dir, sandyPath } = await makeFixture(main, validManifest);
+      try {
+        const result = await loadSandyConfig(sandyPath, env).catch((e) => e);
+        expect(result).toBeInstanceOf(ConfigError);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
   it("fails closed on an unimplemented default_report_format (docx/xlsx/pdf, issue #14)", async () => {
     for (const format of ["docx", "xlsx", "pdf"]) {
       const main = {

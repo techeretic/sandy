@@ -84,6 +84,8 @@ function describeEvent(event: AuditEvent): string {
       return `parse (attempt ${cell(d.attempt)}/${cell(d.maxAttempts)}) → ${cell(d.outcome)}${cell(d.error) ? ` (${cell(d.error)})` : ""}`;
     case "standalone_plan":
       return `plan from ${cell(d.source)} after ${cell(d.attempts)} attempt(s)${cell(d.reason) ? ` — ${cell(d.reason)}` : ""}`;
+    case "standalone_replan":
+      return `replan round ${cell(d.round)} → ${cell(d.outcome)}${cell(d.reason) ? ` — ${cell(d.reason)}` : ""}${cell(d.stop) ? ` (stop: ${cell(d.stop)})` : ""}`;
     case "standalone_narrate":
       return `narrate → ${cell(d.outcome)}${cell(d.error) ? ` (${cell(d.error)})` : ""}`;
     default:

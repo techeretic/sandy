@@ -635,6 +635,12 @@ function describeProgressEvent(e: ProgressEvent): string {
       return `plan attempt ${e.attempt} rejected: ${e.error}`;
     case "parse-fallback":
       return `plan: ${e.reason}`;
+    case "replan-started":
+      return `replanning (round ${e.round}/${e.maxRounds})`;
+    case "replan-attempt-failed":
+      return `replan round ${e.round} attempt ${e.attempt} rejected: ${e.error}`;
+    case "replan-stopped":
+      return `replan stopped (round ${e.round}): ${e.reason}`;
     case "narrating":
       return "narrating";
   }

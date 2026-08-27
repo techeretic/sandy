@@ -253,6 +253,14 @@ const preferencesSchema = z
       .default("markdown"),
     max_concurrent_mcp_calls: z.number().int().min(1).max(100).default(5),
     stream_progress: z.boolean().default(true),
+    /**
+     * Multi-turn / agentic planning (issue #19): how many gather passes the
+     * standalone loop may run. 1 (default) is the single gather→report pass;
+     * >1 lets the model re-plan from the previous round's results (each
+     * follow-up plan re-validated against the same schema + legal tool
+     * catalog; the loop also stops early when there is nothing new to gather).
+     */
+    max_planning_rounds: z.number().int().min(1).max(5).default(1),
   })
   .strict()
   .optional();

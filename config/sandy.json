@@ -23,6 +23,7 @@
   "preferences": {
     "default_report_format": "markdown",
     "max_concurrent_mcp_calls": 5,
-    "stream_progress": true
+    "stream_progress": true,
+    "max_planning_rounds": 1
   }
 }

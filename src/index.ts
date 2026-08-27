@@ -111,6 +111,7 @@ export {
   type Transcript,
 } from "./audit/transcript.js";
 export {
+  callSignature,
   Orchestrator,
   type Claim,
   type GatherTask,
@@ -198,6 +199,7 @@ export {
 export {
   AutonomousLoop,
   NoModelEngineError,
+  replanDecisionSchema,
   type AutonomousLoopOptions,
   type LoopResult,
   type ToolRef,
