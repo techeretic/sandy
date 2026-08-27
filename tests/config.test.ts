@@ -645,4 +645,54 @@ describe("loadSandyConfig: write allowlist (issue #16 / Q6)", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("carries per-arg constraints on a write_allowlist entry through (issue #16 v2)", async () => {
+    const main = {
+      ...validMain,
+      write_allowlist: [{ server: "crm", tool: "read_contacts", args: { region: { enum: ["emea"] } } }],
+    };
+    const { dir, sandyPath } = await makeFixture(main, validManifest);
+    try {
+      const loaded = await loadSandyConfig(sandyPath, env);
+      expect(loaded.writeAllowlist).toEqual([
+        { server: "crm", tool: "read_contacts", args: { region: { enum: ["emea"] } } },
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("defaults policy.approval_ttl_seconds to 1800 when unset (issue #16 v2)", async () => {
+    const { dir, sandyPath } = await makeFixture(validMain, validManifest);
+    try {
+      const loaded = await loadSandyConfig(sandyPath, env);
+      expect(loaded.config.policy.approval_ttl_seconds).toBe(1800);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a configured policy.approval_ttl_seconds", async () => {
+    const main = { ...validMain, policy: { ...validMain.policy, approval_ttl_seconds: 300 } };
+    const { dir, sandyPath } = await makeFixture(main, validManifest);
+    try {
+      const loaded = await loadSandyConfig(sandyPath, env);
+      expect(loaded.config.policy.approval_ttl_seconds).toBe(300);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed on a policy.approval_ttl_seconds out of range (issue #16 v2)", async () => {
+    for (const bad of [0, 86401, 1.5]) {
+      const main = { ...validMain, policy: { ...validMain.policy, approval_ttl_seconds: bad } };
+      const { dir, sandyPath } = await makeFixture(main, validManifest);
+      try {
+        const result = await loadSandyConfig(sandyPath, env).catch((e) => e);
+        expect(result).toBeInstanceOf(ConfigError);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    }
+  });
 });

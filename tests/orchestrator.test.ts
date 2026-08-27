@@ -483,6 +483,249 @@ describe("Write gate (Q6)", () => {
     expect(decision).toEqual({ allowed: false, reason: "not-allowed-by-policy" });
   });
 
+  it("PolicyApprovalGate (v2) allows args that satisfy the entry's per-arg constraints", () => {
+    const gate = new PolicyApprovalGate({
+      allowlist: [{ server: "crm", tool: "write_deal", args: { region: { enum: ["emea", "apac"] } } }],
+    });
+    const approval = { taskId: "w1", approver: "alice", reason: "ok" };
+    gate.approve(approval);
+    const decision = gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: { region: "emea" } }, approval);
+    expect(decision.allowed).toBe(true);
+  });
+
+  it("PolicyApprovalGate (v2) refuses args outside the entry's constraints (args-not-allowed)", () => {
+    const gate = new PolicyApprovalGate({
+      allowlist: [{ server: "crm", tool: "write_deal", args: { region: { enum: ["emea"] } } }],
+    });
+    const approval = { taskId: "w1", approver: "alice", reason: "ok" };
+    gate.approve(approval);
+    const decision = gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: { region: "latam" } }, approval);
+    expect(decision).toEqual({ allowed: false, reason: "args-not-allowed" });
+  });
+
+  it("PolicyApprovalGate (v2) refuses args missing a constrained key (a constraint is a promise about the value)", () => {
+    const gate = new PolicyApprovalGate({
+      allowlist: [{ server: "crm", tool: "write_deal", args: { region: { enum: ["emea"] } } }],
+    });
+    const approval = { taskId: "w1", approver: "alice", reason: "ok" };
+    gate.approve(approval);
+    const decision = gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: {} }, approval);
+    expect(decision).toEqual({ allowed: false, reason: "args-not-allowed" });
+  });
+
+  it("PolicyApprovalGate (v2) lets args carry keys beyond the constraints (pins values, does not enumerate)", () => {
+    const gate = new PolicyApprovalGate({
+      allowlist: [{ server: "crm", tool: "write_deal", args: { region: { enum: ["emea"] } } }],
+    });
+    const approval = { taskId: "w1", approver: "alice", reason: "ok" };
+    gate.approve(approval);
+    const decision = gate.decide(
+      { id: "w1", server: "crm", tool: "write_deal", args: { region: "emea", note: "extra key is fine" } },
+      approval,
+    );
+    expect(decision.allowed).toBe(true);
+  });
+
+  it("PolicyApprovalGate (v2) with no constraints accepts any args (the v1 behavior)", () => {
+    const gate = new PolicyApprovalGate({ allowlist: [{ server: "crm", tool: "write_deal" }] });
+    const approval = { taskId: "w1", approver: "alice", reason: "ok" };
+    gate.approve(approval);
+    const decision = gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: { anything: "goes" } }, approval);
+    expect(decision.allowed).toBe(true);
+  });
+
+  it("PolicyApprovalGate (v2) fails closed on an invalid constraint fragment (never a silent pass)", () => {
+    const gate = new PolicyApprovalGate({
+      allowlist: [{ server: "crm", tool: "write_deal", args: { region: { notARealKeyword: true } } }],
+    });
+    const approval = { taskId: "w1", approver: "alice", reason: "ok" };
+    gate.approve(approval);
+    const decision = gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: { region: "emea" } }, approval);
+    expect(decision).toEqual({ allowed: false, reason: "args-not-allowed" });
+  });
+
+  it("PolicyApprovalGate (v2) allowlist() reports per-arg constraints in configuration order", () => {
+    const gate = new PolicyApprovalGate({
+      allowlist: [
+        { server: "crm", tool: "write_deal", args: { region: { enum: ["emea"] } } },
+        { server: "crm", tool: "read_deals" },
+      ],
+    });
+    expect(gate.allowlist()).toEqual([
+      { server: "crm", tool: "write_deal", args: { region: { enum: ["emea"] } } },
+      { server: "crm", tool: "read_deals" },
+    ]);
+  });
+
+  it("PolicyApprovalGate (v2) expires an approval after the default TTL (clock-seamed)", () => {
+    let now = 1_000_000;
+    const gate = new PolicyApprovalGate({
+      allowlist: [{ server: "crm", tool: "write_deal" }],
+      approvalTtlSeconds: 10,
+      now: () => now,
+    });
+    const approval = { taskId: "w1", approver: "alice", reason: "ok" };
+    gate.approve(approval);
+    // Within the window: allowed.
+    expect(gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: {} }, approval).allowed).toBe(true);
+    // Past the window: expired, with its own audited reason.
+    const gate2 = new PolicyApprovalGate({
+      allowlist: [{ server: "crm", tool: "write_deal" }],
+      approvalTtlSeconds: 10,
+      now: () => now,
+    });
+    gate2.approve(approval);
+    now += 11_000;
+    expect(gate2.decide({ id: "w1", server: "crm", tool: "write_deal", args: {} }, approval)).toEqual({
+      allowed: false,
+      reason: "approval-expired",
+    });
+  });
+
+  it("PolicyApprovalGate (v2) honors an explicit expiresAt that SHORTENS the default window", () => {
+    let now = 1_000_000;
+    const gate = new PolicyApprovalGate({
+      allowlist: [{ server: "crm", tool: "write_deal" }],
+      approvalTtlSeconds: 3600,
+      now: () => now,
+    });
+    // An explicit expiry 1s out, within a 1h default window.
+    const approval = { taskId: "w1", approver: "alice", reason: "ok", expiresAt: new Date(now + 1000).toISOString() };
+    gate.approve(approval);
+    now += 2000; // past the 1s explicit expiry (still inside the 1h default)
+    expect(gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: {} }, approval)).toEqual({
+      allowed: false,
+      reason: "approval-expired",
+    });
+  });
+
+  it("PolicyApprovalGate (v2) lets expiresAt extend NO further than the default TTL (tighten-never-loosen)", () => {
+    let now = 1_000_000;
+    const gate = new PolicyApprovalGate({
+      allowlist: [{ server: "crm", tool: "write_deal" }],
+      approvalTtlSeconds: 10,
+      now: () => now,
+    });
+    // An explicit expiry far in the future is clamped to the default 10s window.
+    const approval = { taskId: "w1", approver: "alice", reason: "ok", expiresAt: new Date(now + 3_600_000).toISOString() };
+    gate.approve(approval);
+    now += 11_000; // past the clamped 10s (not the 1h the approval asked for)
+    expect(gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: {} }, approval)).toEqual({
+      allowed: false,
+      reason: "approval-expired",
+    });
+  });
+
+  it("PolicyApprovalGate (v2) treats an unparseable expiresAt as the default TTL (fail closed, not extended)", () => {
+    let now = 1_000_000;
+    const gate = new PolicyApprovalGate({
+      allowlist: [{ server: "crm", tool: "write_deal" }],
+      approvalTtlSeconds: 10,
+      now: () => now,
+    });
+    const approval = { taskId: "w1", approver: "alice", reason: "ok", expiresAt: "not-a-date" };
+    gate.approve(approval);
+    now += 11_000;
+    expect(gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: {} }, approval)).toEqual({
+      allowed: false,
+      reason: "approval-expired",
+    });
+  });
+
+  it("PolicyApprovalGate (v2) resolves a pending approval with NO inline approval (the consent flow)", () => {
+    const gate = new PolicyApprovalGate({
+      allowlist: [{ server: "crm", tool: "write_deal" }],
+      approvalTtlSeconds: 60,
+      now: () => 1_000_000,
+    });
+    const approval = { taskId: "w1", approver: "alice", reason: "consent recorded out-of-band" };
+    expect(gate.approve(approval)).toBe(true);
+    // decide() with no inline approval still proceeds on the recorded consent.
+    const decision = gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: {} });
+    expect(decision.allowed).toBe(true);
+    if (decision.allowed) expect(decision.approval).toEqual(approval);
+    // Single-use: a second decide with no new consent is refused.
+    expect(gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: {} })).toEqual({
+      allowed: false,
+      reason: "no-approval",
+    });
+  });
+
+  it("PolicyApprovalGate (v2) revokes a pending approval; the write is then refused approval-revoked", () => {
+    const gate = new PolicyApprovalGate({
+      allowlist: [{ server: "crm", tool: "write_deal" }],
+      approvalTtlSeconds: 60,
+      now: () => 1_000_000,
+    });
+    const approval = { taskId: "w1", approver: "alice", reason: "ok" };
+    gate.approve(approval);
+    expect(gate.revoke("w1")).toBe(1);
+    // The recorded consent is gone: a decide with no inline approval is no-approval.
+    expect(gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: {} })).toEqual({
+      allowed: false,
+      reason: "no-approval",
+    });
+    // Re-presenting the (now revoked) approval inline is refused approval-revoked.
+    expect(gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: {} }, approval)).toEqual({
+      allowed: false,
+      reason: "approval-revoked",
+    });
+    // And it can never be re-registered.
+    expect(gate.approve(approval)).toBe(false);
+  });
+
+  it("PolicyApprovalGate (v2) revokes only the named approver when approver is given", () => {
+    const gate = new PolicyApprovalGate({
+      allowlist: [{ server: "crm", tool: "write_deal" }],
+      approvalTtlSeconds: 60,
+      now: () => 1_000_000,
+    });
+    const alice = { taskId: "w1", approver: "alice", reason: "ok" };
+    const bob = { taskId: "w1", approver: "bob", reason: "ok" };
+    gate.approve(alice);
+    gate.approve(bob);
+    // Revoke only alice's consent; bob's stands.
+    expect(gate.revoke("w1", "alice")).toBe(1);
+    expect(gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: {} }, alice)).toEqual({
+      allowed: false,
+      reason: "approval-revoked",
+    });
+    expect(gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: {} }, bob).allowed).toBe(true);
+  });
+
+  it("PolicyApprovalGate (v2) revoke of nothing is a no-op (0), not an error", () => {
+    const gate = new PolicyApprovalGate({ allowlist: [{ server: "crm", tool: "write_deal" }] });
+    expect(gate.revoke("w1")).toBe(0);
+    expect(gate.revoke("w1", "alice")).toBe(0);
+  });
+
+  it("PolicyApprovalGate (v2) treats (taskId, approver) as a durable identity: re-consent needs a fresh task id", () => {
+    let now = 1_000_000;
+    const gate = new PolicyApprovalGate({
+      allowlist: [{ server: "crm", tool: "write_deal" }],
+      approvalTtlSeconds: 10,
+      now: () => now,
+    });
+    const approval = { taskId: "w1", approver: "alice", reason: "ok" };
+    gate.approve(approval);
+    // Let the consent expire.
+    now += 11_000;
+    expect(gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: {} }, approval)).toEqual({
+      allowed: false,
+      reason: "approval-expired",
+    });
+    // The (w1, alice) pair is now durable: re-presenting and re-registering are both refused.
+    expect(gate.decide({ id: "w1", server: "crm", tool: "write_deal", args: {} }, approval)).toEqual({
+      allowed: false,
+      reason: "approval-expired",
+    });
+    expect(gate.approve(approval)).toBe(false);
+    // Re-consent for the SAME write opens a NEW window under a fresh task id.
+    const fresh = { taskId: "w1-retry", approver: "alice", reason: "ok" };
+    expect(gate.approve(fresh)).toBe(true);
+    expect(gate.decide({ id: "w1-retry", server: "crm", tool: "write_deal", args: {} }, fresh).allowed).toBe(true);
+  });
+
   it("logs a write attempt + decision to the audit trail (refused and allowed)", () => {
     const audit = new InMemoryAuditLogger();
     logWriteAttempt(audit, { id: "w1", server: "crm", tool: "write_deal", args: {} }, { allowed: false, reason: "gate-refused" });
@@ -839,6 +1082,7 @@ describe("Orchestrator: end-to-end with report writing", () => {
         dry_run_default: false,
         audit_payload_logging: false,
         ignore_patterns: [],
+        approval_ttl_seconds: 1800,
       },
     });
     const audit = new InMemoryAuditLogger();

@@ -42,7 +42,8 @@ async function writeConfig(
   dir: string,
   allowedPaths: string[],
   tools: string[] = ["read_deals"],
-  writeAllowlist?: Array<{ server: string; tool: string }>,
+  writeAllowlist?: Array<{ server: string; tool: string; args?: Record<string, unknown> }>,
+  policy?: Record<string, unknown>,
 ): Promise<string> {
   const manifest = {
     servers: [
@@ -74,6 +75,7 @@ async function writeConfig(
       dry_run_default: false,
       audit_payload_logging: false,
       ignore_patterns: [],
+      ...policy,
     },
     ...(writeAllowlist !== undefined ? { write_allowlist: writeAllowlist } : {}),
   };
@@ -206,7 +208,11 @@ describe("SandyPluginAPI: write-back (issue #16 / Q6)", () => {
     const cfg = await writeConfig(ws, [ws]);
     const { api, close } = await makeSession(cfg);
     try {
-      expect(api.status({}).write).toEqual({ enabled: false, allowlist: [] });
+      expect(api.status({}).write).toEqual({
+        enabled: false,
+        allowlist: [],
+        approvalTtlSeconds: 1800,
+      });
     } finally {
       await close();
     }
@@ -330,6 +336,197 @@ describe("SandyPluginAPI: write-back (issue #16 / Q6)", () => {
     try {
       await expect(api.write({ tasks: [] })).rejects.toThrow(ToolInputError);
       await expect(api.write({ tasks: [{ id: "w1", server: "crm", tool: "t", args: {} }], approvals: { w1: { approver: "a" } } })).rejects.toThrow(ToolInputError);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe("SandyPluginAPI: write-back v2 (issue #16 — consent, expiry, revocation, per-arg)", () => {
+  it("sandy.write with no approval surfaces needsApproval (the consent prompt), not just a refusal", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, [ws], ["read_deals", "write_deal"], [{ server: "crm", tool: "write_deal" }]);
+    const { api, crm, close } = await makeSession(cfg, {}, ["read_deals", "write_deal"]);
+    try {
+      const result = await api.write({
+        tasks: [{ id: "w1", server: "crm", tool: "write_deal", args: { region: "emea" } }],
+      });
+      // Refused (never auto-approved), and the host is told how to proceed.
+      expect(result.results[0]).toMatchObject({ allowed: false, reason: "no-approval" });
+      expect(crm.calls.get("write_deal")).toBeUndefined();
+      expect(result.needsApproval).toEqual([
+        { taskId: "w1", server: "crm", tool: "write_deal", args: { region: "emea" }, approvalTtlSeconds: 1800 },
+      ]);
+    } finally {
+      await close();
+    }
+  });
+
+  it("sandy.write does NOT surface needsApproval for a policy refusal (asking can't make it legal)", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, [ws], ["read_deals", "write_deal"], [{ server: "crm", tool: "read_deals" }]);
+    const { api, close } = await makeSession(cfg, {}, ["read_deals", "write_deal"]);
+    try {
+      // write_deal is not on the write allowlist — a policy refusal.
+      const offList = await api.write({
+        tasks: [{ id: "w1", server: "crm", tool: "write_deal", args: {} }],
+      });
+      expect(offList.results[0]).toMatchObject({ allowed: false, reason: "not-allowed-by-policy" });
+      expect(offList.needsApproval).toBeUndefined();
+    } finally {
+      await close();
+    }
+  });
+
+  it("the consent flow: needsApproval → sandy.write.approve → sandy.write proceeds on the recorded consent", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, [ws], ["read_deals", "write_deal"], [{ server: "crm", tool: "write_deal" }]);
+    const { api, session, crm, close } = await makeSession(cfg, {}, ["read_deals", "write_deal"]);
+    try {
+      const first = await api.write({
+        tasks: [{ id: "w1", server: "crm", tool: "write_deal", args: { region: "emea" } }],
+      });
+      expect(first.results[0]).toMatchObject({ allowed: false, reason: "no-approval" });
+
+      // The host gets the user's consent and records it ahead of time.
+      const receipt = api.writeApprove({ taskId: "w1", approver: "alice", reason: "user said yes" });
+      expect(receipt.approved).toBe(true);
+      expect(receipt.expiresAt).toBeDefined();
+      expect(receipt.approvalTtlSeconds).toBe(1800);
+
+      // A later sandy.write for the same task proceeds on that consent — no
+      // inline approval needed.
+      const second = await api.write({
+        tasks: [{ id: "w1", server: "crm", tool: "write_deal", args: { region: "emea" } }],
+      });
+      expect(second.results[0]).toMatchObject({ task: "w1", allowed: true });
+      expect(crm.calls.get("write_deal")).toBe(1);
+      // Two audited write attempts: the first refusal (no-approval), then the
+      // approved write — with the out-of-band approver named.
+      const attempts = session.sandy.audit.events().filter((e) => e.type === "write_attempt");
+      expect(attempts).toHaveLength(2);
+      expect(attempts[0]?.data).toMatchObject({ allowed: false, reason: "no-approval" });
+      expect(attempts[1]?.data).toMatchObject({ allowed: true, approver: "alice" });
+    } finally {
+      await close();
+    }
+  });
+
+  it("sandy.write.approve refuses a duplicate (taskId, approver) — no replay", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, [ws], ["read_deals", "write_deal"], [{ server: "crm", tool: "write_deal" }]);
+    const { api, close } = await makeSession(cfg, {}, ["read_deals", "write_deal"]);
+    try {
+      const a = api.writeApprove({ taskId: "w1", approver: "alice", reason: "ok" });
+      expect(a.approved).toBe(true);
+      const b = api.writeApprove({ taskId: "w1", approver: "alice", reason: "ok" });
+      expect(b.approved).toBe(false);
+      expect(b.reason).toMatch(/already|revoked/);
+    } finally {
+      await close();
+    }
+  });
+
+  it("sandy.write.approve fails closed when write-back is not enabled (no allowlist)", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, [ws], ["read_deals", "write_deal"]);
+    const { api, close } = await makeSession(cfg, {}, ["read_deals", "write_deal"]);
+    try {
+      const r = api.writeApprove({ taskId: "w1", approver: "alice", reason: "ok" });
+      expect(r.approved).toBe(false);
+      expect(r.reason).toMatch(/not enabled/);
+    } finally {
+      await close();
+    }
+  });
+
+  it("sandy.write.revoke withdraws a recorded consent; the write is then refused approval-revoked", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, [ws], ["read_deals", "write_deal"], [{ server: "crm", tool: "write_deal" }]);
+    const { api, crm, close } = await makeSession(cfg, {}, ["read_deals", "write_deal"]);
+    try {
+      api.writeApprove({ taskId: "w1", approver: "alice", reason: "ok" });
+      // The user changes their mind.
+      const revoked = api.writeRevoke({ taskId: "w1" });
+      expect(revoked.revoked).toBe(1);
+      // The consent is gone: decide falls through to no-approval.
+      const after = await api.write({ tasks: [{ id: "w1", server: "crm", tool: "write_deal", args: {} }] });
+      expect(after.results[0]).toMatchObject({ allowed: false, reason: "no-approval" });
+      expect(crm.calls.get("write_deal")).toBeUndefined();
+    } finally {
+      await close();
+    }
+  });
+
+  it("sandy.write.revoke of nothing is 0 (a no-op, not an error)", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, [ws], ["read_deals", "write_deal"], [{ server: "crm", tool: "write_deal" }]);
+    const { api, close } = await makeSession(cfg, {}, ["read_deals", "write_deal"]);
+    try {
+      expect(api.writeRevoke({ taskId: "w1" }).revoked).toBe(0);
+    } finally {
+      await close();
+    }
+  });
+
+  it("refuses a write whose args fall outside the entry's per-arg constraints (args-not-allowed)", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, [ws], ["read_deals", "write_deal"], [
+      { server: "crm", tool: "write_deal", args: { region: { enum: ["emea"] } } },
+    ]);
+    const { api, crm, close } = await makeSession(cfg, {}, ["read_deals", "write_deal"]);
+    try {
+      const result = await api.write({
+        tasks: [{ id: "w1", server: "crm", tool: "write_deal", args: { region: "latam" } }],
+        approvals: { w1: { approver: "alice", reason: "ok" } },
+      });
+      expect(result.results[0]).toMatchObject({ allowed: false, reason: "args-not-allowed" });
+      expect(crm.calls.get("write_deal")).toBeUndefined();
+      // A policy refusal is not a consent gap.
+      expect(result.needsApproval).toBeUndefined();
+    } finally {
+      await close();
+    }
+  });
+
+  it("allows a write whose args satisfy the entry's per-arg constraints", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, [ws], ["read_deals", "write_deal"], [
+      { server: "crm", tool: "write_deal", args: { region: { enum: ["emea"] } } },
+    ]);
+    const { api, crm, close } = await makeSession(cfg, {}, ["read_deals", "write_deal"]);
+    try {
+      const result = await api.write({
+        tasks: [{ id: "w1", server: "crm", tool: "write_deal", args: { region: "emea" } }],
+        approvals: { w1: { approver: "alice", reason: "ok" } },
+      });
+      expect(result.results[0]).toMatchObject({ allowed: true });
+      expect(crm.calls.get("write_deal")).toBe(1);
+    } finally {
+      await close();
+    }
+  });
+
+  it("an expired approval is refused approval-expired (clock-seamed TTL)", async () => {
+    const ws = await tmpWorkspace();
+    // A 1-second TTL so the test can step past it.
+    const cfg = await writeConfig(
+      ws,
+      [ws],
+      ["read_deals", "write_deal"],
+      [{ server: "crm", tool: "write_deal" }],
+      { approval_ttl_seconds: 1 },
+    );
+    const { api, close } = await makeSession(cfg, {}, ["read_deals", "write_deal"]);
+    try {
+      const receipt = api.writeApprove({ taskId: "w1", approver: "alice", reason: "ok" });
+      expect(receipt.approved).toBe(true);
+      // Step the real clock past the 1s window (the gate uses Date.now).
+      await new Promise((r) => setTimeout(r, 1100));
+      const result = await api.write({ tasks: [{ id: "w1", server: "crm", tool: "write_deal", args: {} }] });
+      expect(result.results[0]).toMatchObject({ allowed: false, reason: "approval-expired" });
+      // And it is surfaced as a consent gap (re-consent is the remedy).
+      expect(result.needsApproval?.[0]).toMatchObject({ taskId: "w1", approvalTtlSeconds: 1 });
     } finally {
       await close();
     }
@@ -498,10 +695,12 @@ describe("createSandyMcpServer: MCP surface (PL-01/PL-02)", () => {
           "sandy.files.write",
           "sandy.gather",
           "sandy.model.usage",
-          "sandy.report",
-          "sandy.status",
-          "sandy.write",
-        ].sort(),
+           "sandy.report",
+           "sandy.status",
+           "sandy.write",
+           "sandy.write.approve",
+           "sandy.write.revoke",
+         ].sort(),
       );
 
       const statusRes = (await client.callTool({ name: "sandy.status", arguments: {} })) as {

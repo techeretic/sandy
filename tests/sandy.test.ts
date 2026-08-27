@@ -69,7 +69,9 @@ async function writeConfig(
     /** Tools the in-memory `crm` server exposes (default: read_deals). */
     crmTools?: string[];
     /** The admin write allowlist (issue #16 / Q6). */
-    writeAllowlist?: Array<{ server: string; tool: string }>;
+    writeAllowlist?: Array<{ server: string; tool: string; args?: Record<string, unknown> }>;
+    /** Merge over the default policy (e.g. a custom approval_ttl_seconds). */
+    policy?: Record<string, unknown>;
   },
 ): Promise<string> {
   const crmTools = opts.crmTools ?? ["read_deals"];
@@ -103,6 +105,7 @@ async function writeConfig(
       dry_run_default: false,
       audit_payload_logging: false,
       ignore_patterns: [],
+      ...opts.policy,
     },
     ...(opts.preferences ? { preferences: opts.preferences } : {}),
     ...(opts.templates ? { templates: { path: "./templates.json" } } : {}),
@@ -335,7 +338,11 @@ describe("createSandy: write-back (issue #16 / Q6)", () => {
       detection: pinnedDetection,
     });
     try {
-      expect(sandy.check().write).toEqual({ enabled: false, allowlist: [] });
+      expect(sandy.check().write).toEqual({
+        enabled: false,
+        allowlist: [],
+        approvalTtlSeconds: 1800,
+      });
       expect(sandy.writeGate).toBeInstanceOf(ReadOnlyGate);
       const results = await sandy.write([
         { id: "w1", server: "crm", tool: "write_deal", args: {} },
@@ -366,6 +373,7 @@ describe("createSandy: write-back (issue #16 / Q6)", () => {
       expect(sandy.check().write).toEqual({
         enabled: true,
         allowlist: [{ server: "crm", tool: "write_deal" }],
+        approvalTtlSeconds: 1800,
       });
       expect(sandy.writeGate).toBeInstanceOf(PolicyApprovalGate);
 
@@ -380,6 +388,78 @@ describe("createSandy: write-back (issue #16 / Q6)", () => {
 
       const writeEvents = sandy.audit.events().filter((e) => e.type === "write_attempt");
       expect(writeEvents[0]?.data).toMatchObject({ allowed: true, approver: "alice" });
+    } finally {
+      await closeAll([sandy]);
+    }
+  });
+
+  it("wires policy.approval_ttl_seconds into the gate (issue #16 v2)", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, {
+      allowedPaths: [ws],
+      crmTools: ["read_deals", "write_deal"],
+      writeAllowlist: [{ server: "crm", tool: "write_deal" }],
+      policy: { approval_ttl_seconds: 300 },
+    });
+    const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }, { name: "write_deal" }]);
+    inMemServers.push(crm);
+    const sandy = await createSandy({
+      sandyPath: cfg,
+      transportFactory: () => crm.transport,
+      detection: pinnedDetection,
+    });
+    try {
+      expect(sandy.check().write.approvalTtlSeconds).toBe(300);
+      expect(sandy.writeGate).toBeInstanceOf(PolicyApprovalGate);
+      // The TTL reaches the gate: an approval registered now expires ~300s out.
+      const gate = sandy.writeGate as PolicyApprovalGate;
+      expect(gate.approvalTtlSeconds()).toBe(300);
+      const expiry = gate
+        .approve({ taskId: "w1", approver: "alice", reason: "ok" })
+        ? gate.pendingExpiry("w1", "alice")
+        : undefined;
+      expect(expiry).toBeTypeOf("number");
+      expect((expiry as number) - Date.now()).toBeGreaterThan(290_000);
+      expect((expiry as number) - Date.now()).toBeLessThanOrEqual(300_000);
+    } finally {
+      await closeAll([sandy]);
+    }
+  });
+
+  it("enforces per-arg constraints end-to-end (args-not-allowed, allowlisted but out-of-bounds)", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, {
+      allowedPaths: [ws],
+      crmTools: ["read_deals", "write_deal"],
+      writeAllowlist: [{ server: "crm", tool: "write_deal", args: { region: { enum: ["emea"] } } }],
+    });
+    const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }, { name: "write_deal" }]);
+    inMemServers.push(crm);
+    const sandy = await createSandy({
+      sandyPath: cfg,
+      transportFactory: () => crm.transport,
+      detection: pinnedDetection,
+    });
+    try {
+      // The posture reports the constraint.
+      expect(sandy.check().write.allowlist).toEqual([
+        { server: "crm", tool: "write_deal", args: { region: { enum: ["emea"] } } },
+      ]);
+      const approval = { taskId: "w1", approver: "alice", reason: "ok" };
+      // Out-of-bounds args are refused even with a valid approval, before the wire.
+      const bad = await sandy.write(
+        [{ id: "w1", server: "crm", tool: "write_deal", args: { region: "latam" } }],
+        { w1: approval },
+      );
+      expect(bad[0]).toMatchObject({ allowed: false, reason: "args-not-allowed" });
+      expect(crm.calls.get("write_deal")).toBeUndefined();
+      // In-bounds args pass (a fresh approval — the first was not consumed on the policy refusal).
+      const good = await sandy.write(
+        [{ id: "w1", server: "crm", tool: "write_deal", args: { region: "emea" } }],
+        { w1: { taskId: "w1", approver: "alice", reason: "ok" } },
+      );
+      expect(good[0]).toMatchObject({ allowed: true });
+      expect(crm.calls.get("write_deal")).toBe(1);
     } finally {
       await closeAll([sandy]);
     }

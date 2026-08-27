@@ -67,7 +67,7 @@ function describeProgress(e: ProgressEvent): string {
       case "write-approved":
         return `write ${e.task} → ${e.server}/${e.tool} approved by ${e.approver}`;
       case "write-denied":
-        return `write ${e.task} denied: ${e.reason}`;
+        return `write ${e.task} → ${e.server}/${e.tool} denied: ${e.reason}`;
       case "write-succeeded":
         return `write ${e.task} ok (${e.durationMs}ms)`;
       case "write-failed":

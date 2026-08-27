@@ -132,11 +132,16 @@ export interface SandyCheckReport {
   /**
    * Write-back posture (issue #16 / Q6). `enabled` is true only when an admin
    * `write_allowlist` is configured; the allowlist lists the (server, tool)
-   * pairs a write may target. When absent, writes are refused (read-only).
+   * pairs a write may target (each optionally constrained on its args, issue
+   * #16 v2). `approvalTtlSeconds` is the default window an approval is usable
+   * (approvals are time-bound; there is no standing consent). When the
+   * allowlist is absent, writes are refused (read-only).
    */
   write: {
     enabled: boolean;
-    allowlist: Array<{ server: string; tool: string }>;
+    allowlist: Array<{ server: string; tool: string; args?: Record<string, unknown> }>;
+    /** The default per-write approval TTL in seconds (issue #16 v2). */
+    approvalTtlSeconds: number;
   };
 }
 
@@ -291,10 +296,14 @@ export async function createSandy(deps: SandyDeps): Promise<Sandy> {
   const preferences = loaded.config.preferences;
   // Write-back gate (issue #16 / Q6). When the admin configured a
   // write_allowlist, a PolicyApprovalGate enforces it (each write still
-  // needs an explicit, per-write approval). Otherwise the default ReadOnlyGate
+  // needs an explicit, per-write approval — time-bound by the policy's
+  // approval TTL, revocable before use). Otherwise the default ReadOnlyGate
   // refuses every write — fail closed, read-and-report.
   const writeGate: WriteApprovalGate = loaded.writeAllowlist
-    ? new PolicyApprovalGate({ allowlist: loaded.writeAllowlist })
+    ? new PolicyApprovalGate({
+        allowlist: loaded.writeAllowlist,
+        approvalTtlSeconds: loaded.config.policy.approval_ttl_seconds,
+      })
     : new ReadOnlyGate();
   const orchestrator = createOrchestrator({
     manager,
@@ -371,6 +380,7 @@ export async function createSandy(deps: SandyDeps): Promise<Sandy> {
         write: {
           enabled: loaded.writeAllowlist !== undefined,
           allowlist: loaded.writeAllowlist ?? [],
+          approvalTtlSeconds: loaded.config.policy.approval_ttl_seconds,
         },
       };
     },

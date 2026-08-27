@@ -242,7 +242,9 @@ export async function loadSandyConfig(
           `write_allowlist references tool "${entry.tool}", which is not allowed on server "${entry.server}" (allowed tools: ${server.allowed_tools.join(", ")}). The write allowlist must be a subset of the read allowlist (CP-02). Refusing to start (fail-closed).`,
         );
       }
-      writeAllowlist.push({ server: entry.server, tool: entry.tool });
+      writeAllowlist.push(
+        entry.args !== undefined ? { server: entry.server, tool: entry.tool, args: entry.args } : { server: entry.server, tool: entry.tool },
+      );
     }
   }
 

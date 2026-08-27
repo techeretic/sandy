@@ -198,7 +198,7 @@ function progressSink(enabled: boolean): (e: ProgressEvent) => void {
         w(`\u270e write ${e.task} \u2192 ${e.server}/${e.tool} approved by ${e.approver}`);
         break;
       case "write-denied":
-        w(`\u2717 write ${e.task} denied: ${e.reason}`);
+        w(`✗ write ${e.task} → ${e.server}/${e.tool} denied: ${e.reason}`);
         break;
       case "write-succeeded":
         w(`\u2713 write ${e.task} (${e.durationMs}ms)`);

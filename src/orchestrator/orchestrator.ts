@@ -9,6 +9,7 @@ import {
   ReadOnlyGate,
   type WriteApproval,
   type WriteApprovalGate,
+  type WriteDenialReason,
   type WriteTask,
 } from "./write-gate.js";
 
@@ -33,7 +34,7 @@ export type ProgressEvent =
   | { type: "report-writing"; path: string }
   // Write-back (Q6): a write task passing the approval gate.
   | { type: "write-approved"; task: string; server: string; tool: string; approver: string }
-  | { type: "write-denied"; task: string; reason: string }
+  | { type: "write-denied"; task: string; server: string; tool: string; reason: string }
   | { type: "write-succeeded"; task: string; durationMs: number }
   | { type: "write-failed"; task: string; error: string }
   | { type: "done"; claims: number; gaps: number }
@@ -85,7 +86,7 @@ export interface WriteResult {
   tool: string;
   allowed: boolean;
   /** Why it was refused (absent when allowed). */
-  reason?: "not-allowed-by-policy" | "no-approval" | "gate-refused";
+  reason?: WriteDenialReason;
   /** The server's result, when the write was approved and executed. */
   result?: unknown;
   /** The failure, when an approved write could not be executed. */
@@ -342,7 +343,13 @@ export class Orchestrator {
       const decision = await this.writeGate.decide(task, approval);
       logWriteAttempt(this.audit, task, decision);
       if (!decision.allowed) {
-        this.onProgress({ type: "write-denied", task: task.id, reason: decision.reason });
+        this.onProgress({
+          type: "write-denied",
+          task: task.id,
+          server: task.server,
+          tool: task.tool,
+          reason: decision.reason,
+        });
         results.push({
           task: task.id,
           server: task.server,

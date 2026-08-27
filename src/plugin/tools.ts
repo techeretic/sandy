@@ -90,6 +90,12 @@ export const writeApprovalShape = {
     .min(1)
     .describe("Who approved — the human principal or an approved automation's identity"),
   reason: z.string().min(1).describe("Why the write was approved (audited)"),
+  expiresAt: z
+    .string()
+    .optional()
+    .describe(
+      "Optional explicit expiry (ISO-8601). Without it the policy's approval TTL applies. May only shorten the default window, never extend it.",
+    ),
 } as const;
 
 export type WriteApprovalInput = z.infer<typeof writeApprovalShape>;
@@ -115,8 +121,79 @@ export const writeToolInput = z
  */
 export type WriteTaskResult = WriteResult;
 
+/**
+ * A write that is legal (allowlisted, args within constraints) but has not
+ * been approved yet (issue #16 v2 — the in-band consent flow). The host must
+ * surface this to the user and re-invoke `sandy.write` with an approval for
+ * the same (taskId, args); it may also be revoked by the user before then.
+ */
+export interface PendingWriteApproval {
+  taskId: string;
+  server: string;
+  tool: string;
+  /** The exact args the approval will be bound to. */
+  args: Record<string, unknown>;
+  /** How long the approval, once given, stays usable (policy TTL). */
+  approvalTtlSeconds: number;
+}
+
 export interface WriteToolResult {
   results: WriteResult[];
+  /**
+   * Set when at least one task was legal but unapproved (or the user's
+   * approval was missing/expired/revoked). The host asks the user and
+   * re-invokes with `approvals` for the listed tasks. Never set alongside a
+   * task that was executed.
+   */
+  needsApproval?: PendingWriteApproval[];
+}
+
+/**
+ * Record a write approval ahead of time (issue #16 v2 — the consent flow).
+ * The host gets the user's consent, records it here, and a later `sandy.write`
+ * for the same task then proceeds on that approval (no need to re-pass it).
+ * The approval is single-use and time-bound; re-recording the same
+ * (taskId, approver) is refused.
+ */
+export const writeApproveInput = z
+  .object(writeApprovalShape)
+  .extend({
+    taskId: z.string().min(1).describe("The write task id the approval is bound to"),
+  })
+  .strict();
+
+export interface WriteApproveResult {
+  /** True when the approval was recorded; false when it was refused (duplicate / revoked). */
+  approved: boolean;
+  /** When refused, why. */
+  reason?: string;
+  /** When approved, when the approval stops being usable (the earlier of the given `expiresAt` and the default TTL window). */
+  expiresAt?: string;
+  /** The default approval TTL in seconds, for the host to show the user. */
+  approvalTtlSeconds?: number;
+}
+
+/**
+ * Revoke a write approval before it is used (issue #16 v2 — the user can
+ * withdraw consent). With `approver` given, only that approver's approval for
+ * the task is revoked; without it, every pending approval for the task is.
+ * A revoked (taskId, approver) pair can never approve a write again
+ * afterwards.
+ */
+export const writeRevokeInput = z
+  .object({
+    taskId: z.string().min(1).describe("The write task id to revoke approvals for"),
+    approver: z
+      .string()
+      .min(1)
+      .optional()
+      .describe("Limit the revocation to this approver (default: all pending approvals for the task)"),
+  })
+  .strict();
+
+export interface WriteRevokeResult {
+  /** How many pending approvals were revoked (0 when there was nothing to revoke). */
+  revoked: number;
 }
 
 // --- sandy.status ----------------------------------------------------------

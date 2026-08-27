@@ -235,6 +235,16 @@ const policySchema = z
     dry_run_default: z.boolean().default(false),
     audit_payload_logging: z.boolean().default(false),
     ignore_patterns: z.array(z.string().min(1)).default([]),
+    /**
+     * Write-approval TTL (issue #16 v2): how long a per-write approval is
+     * usable, in seconds, from when it is registered or first presented.
+     * Approvals are time-bound by construction — there is no standing
+     * blanket consent — so the default bound applies when an approval carries
+     * no explicit `expiresAt` (which may only shorten it, never extend it).
+     * Capped at one day: a longer window would recreate blanket consent in
+     * all but name (tighten-never-loosen).
+     */
+    approval_ttl_seconds: z.number().int().min(1).max(86400).default(1800),
   })
   .strict()
   .refine(
@@ -273,6 +283,13 @@ const preferencesSchema = z
  * on an entry that names an unknown server or a non-allowed tool, so the
  * write allowlist can never be wider than the read allowlist. When absent
  * (or empty), no write is possible: the default gate refuses all writes.
+ *
+ * An entry may additionally carry `args` — a per-arg constraint (issue #16
+ * v2). It is a JSON Schema fragment matched with the same semantics as the
+ * MCP SDK's `structuredContent` validation: every constraint the entry states
+ * must hold for the write's args, and args may contain further keys (the
+ * constraint pins values, it does not enumerate the full argument set — the
+ * server's own input schema remains the final authority on argument validity).
  */
 export const writeAllowlistEntrySchema = z
   .object({
@@ -281,6 +298,12 @@ export const writeAllowlistEntrySchema = z
       .string()
       .min(1)
       .describe("Tool name (must be in the server's allowed_tools)"),
+    args: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .describe(
+        "Per-arg constraints the write's args must satisfy (JSON Schema fragment: type/enum/const/... per key). Omit to allow any args (the v1 behavior).",
+      ),
   })
   .strict();
 

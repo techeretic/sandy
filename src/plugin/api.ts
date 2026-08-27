@@ -25,14 +25,19 @@ import {
   modelUsageInput,
   reportToolInput,
   statusToolInput,
+  writeApproveInput,
+  writeRevokeInput,
   writeToolInput,
   type FilesListResult,
   type FilesMutateResult,
   type FilesReadResult,
   type GatherToolResult,
   type ModelUsageToolResult,
+  type PendingWriteApproval,
   type ReportToolResult,
   type StatusToolResult,
+  type WriteApproveResult,
+  type WriteRevokeResult,
   type WriteToolResult,
 } from "./tools.js";
 
@@ -109,11 +114,12 @@ export class SandyPluginAPI {
 
   /**
    * `sandy.write` — write-back to internal systems (issue #16 / Q6). Each task
-   * must pass the session's write gate — the admin write allowlist AND an
-   * explicit, per-write approval — before it reaches a server. The approval is
-   * registered with the gate as the out-of-band human action, and is
-   * single-use: the gate consumes it, and re-presenting the same approval is
-   * refused.
+   * must pass the session's write gate — the admin write allowlist (and its
+   * per-arg constraints), AND an explicit, per-write approval — before it
+   * reaches a server. The approval is single-use: the gate consumes it, and
+   * re-presenting the same approval is refused. An approval may be passed
+   * inline (`approvals`) OR recorded ahead of time with `sandy.write.approve`
+   * (the consent flow) — the gate resolves either.
    *
    * Never auto-confirm (FM-04): a task without a valid approval is refused
    * with `no-approval` and audited — it is never executed. A refused write is
@@ -125,21 +131,15 @@ export class SandyPluginAPI {
     const taskIds = new Set(body.tasks.map((t) => t.id));
     const approvals: Record<string, WriteApproval> = {};
     for (const [taskId, approval] of Object.entries(body.approvals ?? {})) {
-      // Only register approvals for a task in THIS call — a stray approval
-      // can never be banked for a later write.
+      // Only pass approvals for a task in THIS call — a stray approval is
+      // dropped, never banked for a later write.
       if (!taskIds.has(taskId)) continue;
-      const writeApproval: WriteApproval = {
+      approvals[taskId] = {
         taskId,
         approver: approval.approver,
         reason: approval.reason,
+        ...(approval.expiresAt !== undefined ? { expiresAt: approval.expiresAt } : {}),
       };
-      // Register the approval out-of-band (the human act). A duplicate
-      // (taskId, approver) pair is refused, so a captured approval can never
-      // be replayed onto a second write.
-      if (gate instanceof PolicyApprovalGate) {
-        gate.approve(writeApproval);
-      }
-      approvals[taskId] = writeApproval;
     }
     const tasks: WriteTask[] = body.tasks.map((t) => ({
       id: t.id,
@@ -147,7 +147,90 @@ export class SandyPluginAPI {
       tool: t.tool,
       args: t.args,
     }));
-    return { results: await this.session.sandy.write(tasks, approvals) };
+    const results = await this.session.sandy.write(tasks, approvals);
+    // The consent flow (issue #16 v2): with a policy gate, a write that is
+    // legal (allowlisted, args within the entry's constraints) but was not
+    // executed because no valid approval was presented is surfaced as
+    // `needsApproval` — the host asks the user and re-invokes with an
+    // approval for exactly these tasks (the same taskId + args; the
+    // re-presented approval is consumed, so it stays single-use). A task that
+    // is not allowlisted, whose args fall outside the policy's constraints, or
+    // that hit the read-only gate is a POLICY refusal, not a consent gap — it
+    // is NOT listed (asking the user could not make it legal).
+    let needsApproval: PendingWriteApproval[] | undefined;
+    if (gate instanceof PolicyApprovalGate) {
+      const ttl = gate.approvalTtlSeconds();
+      const pending = tasks.filter((t, i) => {
+        const reason = results[i]!.reason;
+        return (
+          !results[i]!.allowed &&
+          (reason === "no-approval" || reason === "approval-expired" || reason === "approval-revoked")
+        );
+      });
+      if (pending.length > 0) {
+        needsApproval = pending.map((t) => ({
+          taskId: t.id,
+          server: t.server,
+          tool: t.tool,
+          args: t.args,
+          approvalTtlSeconds: ttl,
+        }));
+      }
+    }
+    return {
+      results,
+      ...(needsApproval !== undefined ? { needsApproval } : {}),
+    };
+  }
+
+  /**
+   * `sandy.write.approve` — record a write approval ahead of time (issue #16
+   * v2: the consent flow). The host gets the user's consent, records it here,
+   * and a later `sandy.write` for the same task then proceeds on that
+   * approval. The receipt carries the computed `expiresAt` so the host can
+   * tell the user how long the consent lasts. The approval is single-use and
+   * time-bound; re-recording the same (taskId, approver) is refused.
+   */
+  writeApprove(input: unknown): WriteApproveResult {
+    const body = validate("sandy.write.approve", writeApproveInput, input);
+    const gate = this.session.sandy.writeGate;
+    if (!(gate instanceof PolicyApprovalGate)) {
+      // No policy gate (read-only posture) ⇒ there is nothing to approve.
+      return { approved: false, reason: "write-back is not enabled (no write allowlist configured)" };
+    }
+    const approval: WriteApproval = {
+      taskId: body.taskId,
+      approver: body.approver,
+      reason: body.reason,
+      ...(body.expiresAt !== undefined ? { expiresAt: body.expiresAt } : {}),
+    };
+    if (!gate.approve(approval)) {
+      return { approved: false, reason: "approval already recorded or revoked for this (taskId, approver)" };
+    }
+    const expiresAt = gate.pendingExpiry(body.taskId, body.approver);
+    return {
+      approved: true,
+      ...(expiresAt !== undefined ? { expiresAt: new Date(expiresAt).toISOString() } : {}),
+      approvalTtlSeconds: gate.approvalTtlSeconds(),
+    };
+  }
+
+  /**
+   * `sandy.write.revoke` — withdraw a write approval before it is used
+   * (issue #16 v2: the user can revoke consent). With `approver` given, only
+   * that approver's approval for the task is revoked; without it, every
+   * pending approval for the task is. After a successful revoke the pair can
+   * never approve a write again — presenting it is refused with
+   * `approval-revoked`.
+   */
+  writeRevoke(input: unknown): WriteRevokeResult {
+    const body = validate("sandy.write.revoke", writeRevokeInput, input);
+    const gate = this.session.sandy.writeGate;
+    if (!(gate instanceof PolicyApprovalGate)) {
+      // No policy gate (read-only posture) ⇒ there is no approval to revoke.
+      return { revoked: 0 };
+    }
+    return { revoked: gate.revoke(body.taskId, body.approver) };
   }
 
   private async run(request: ReturnType<typeof toOrchestratorRequest>): Promise<ReportToolResult> {

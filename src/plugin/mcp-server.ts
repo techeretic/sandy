@@ -12,6 +12,8 @@ import {
   modelUsageShape,
   reportToolInput,
   statusToolInput,
+  writeApproveInput,
+  writeRevokeInput,
   writeToolInput,
 } from "./tools.js";
 
@@ -102,10 +104,31 @@ export function createSandyMcpServer(options: SandyMcpServerOptions): McpServer 
     {
       description:
         "Write back to an internal system via an MCP tool. Approval-gated (Q6): each task must be on the admin write allowlist AND carry an explicit per-write approval " +
-        "(ask the user first; approvals are single-use and audited). Tasks without a valid approval are refused, never auto-approved.",
+        "(ask the user first; approvals are single-use, time-bound, and audited). Tasks without a valid approval are refused, never auto-approved — " +
+        "the result's needsApproval lists the legal-but-unapproved tasks for you to put to the user.",
       inputSchema: writeToolInput.shape,
     },
     wrap((args) => api.write(args)),
+  );
+
+  server.registerTool(
+    "sandy.write.approve",
+    {
+      description:
+        "Record a per-write approval ahead of time (the user's consent, Q6). A later sandy.write for the same task then proceeds on it. Approvals are single-use and time-bound; the result's expiresAt says how long the consent lasts.",
+      inputSchema: writeApproveInput.shape,
+    },
+    wrap((args) => api.writeApprove(args)),
+  );
+
+  server.registerTool(
+    "sandy.write.revoke",
+    {
+      description:
+        "Revoke a pending write approval before it is used (the user withdraws consent). With approver given, only that approver's approval is revoked; without it, every pending approval for the task. A revoked pair can never approve a write again.",
+      inputSchema: writeRevokeInput.shape,
+    },
+    wrap((args) => api.writeRevoke(args)),
   );
 
   server.registerTool(
