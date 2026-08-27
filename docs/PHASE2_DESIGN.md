@@ -159,7 +159,9 @@ Key properties:
   already does this; `invoke()` records in/out tokens.
 - **Narrow task scope** (SD-05): v1 standalone loop is the single
   gather → report pass, the same shape the plugin exposes. Multi-turn /
-  agentic tool-selection is a later extension, not the v2 core.
+  agentic tool-selection is a later extension, not the v2 core. (Now landed
+  as a bounded opt-in — `preferences.max_planning_rounds` > 1, issue #19:
+  each follow-up round passes the same validate-then-run gate as round 1.)
 
 ### Threat model note: prompt injection via MCP-retrieved content
 
@@ -187,6 +189,13 @@ Existing mitigations, by design:
   useful or errors, `narrate()` returns `null` and the caller keeps the
   already-written deterministic report (no narrative section) — a dead model
   is reported, not a crash.
+
+The same analysis extends to the multi-round replan step (issue #19): the
+replan prompt also embeds `claim.text` (untrusted), but the blast radius is
+strictly bounded — the decision can only be `stop` or a set of gather tasks
+that pass the same schema + legal-tool-catalog gate as round 1, so the worst
+case is a few extra *legal* MCP calls within the round cap, never an
+unvalidated request, never a write (replan only produces gather tasks).
 
 What this does **not** mitigate: the narrative text itself could still be
 misleading if a weak local model is successfully steered by injected content,
@@ -587,7 +596,10 @@ service adds a REST surface for a UI / other local tools.
 - Write-back to internal systems (still Q6-deferred; the gate contract exists).
 - Extra report formats (HTML/DOCX/XLSX/PDF) — still deferred.
 - Recurring report templates (RG-08) — still deferred.
-- Multi-turn agentic planning beyond the single gather→report pass.
+- ~~Multi-turn agentic planning beyond the single gather→report pass.~~ — now
+  implemented as a bounded, opt-in extension (`preferences.max_planning_rounds`,
+  default 1 = the single pass; each follow-up round re-validated by the same
+  schema + legal-tool-catalog gate — issue #19).
 - Multi-user / network-exposed API (one instance per user, loopback only).
 - ~~A hard in-service memory ceiling for the model, if the team defers that to
   the service manager (§4.5)~~ — now implemented as an opt-in

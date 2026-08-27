@@ -42,6 +42,11 @@ export type ProgressEvent =
   | { type: "parse-started"; maxAttempts: number }
   | { type: "parse-attempt-failed"; attempt: number; error: string }
   | { type: "parse-fallback"; reason: string }
+  // Multi-round planning (issue #19): the loop re-plans from the previous
+  // round's results — either adding a further gather pass or stopping.
+  | { type: "replan-started"; round: number; maxRounds: number }
+  | { type: "replan-attempt-failed"; round: number; attempt: number; error: string }
+  | { type: "replan-stopped"; round: number; reason: "stop" | "nothing-new" | "exhausted" | "max-rounds" }
   | { type: "narrating" };
 
 /** A provenance-tracked statement produced by the run (RG-04). */
@@ -157,6 +162,16 @@ function canonicalize(value: unknown): string {
 
 function hashOf(args: Record<string, unknown>): string {
   return createHash("sha256").update(canonicalize(args)).digest("hex");
+}
+
+/**
+ * The identity of a tool call for de-duplication (issue #19): the same server,
+ * tool, and (canonicalized) args — the same canonical form as `hashOf`. The
+ * multi-round loop uses it to refuse re-gathering what an earlier round already
+ * gathered (a replan that only re-proposes known calls is "nothing new").
+ */
+export function callSignature(server: string, tool: string, args: Record<string, unknown>): string {
+  return `${server}/${tool} ${canonicalize(args)}`;
 }
 
 /**

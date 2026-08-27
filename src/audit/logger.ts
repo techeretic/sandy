@@ -27,6 +27,8 @@ export type AuditEventType =
   | "standalone_parse"
   | "standalone_plan"
   | "standalone_narrate"
+  // Multi-round planning (issue #19): the loop's replan decisions.
+  | "standalone_replan"
   // Recurring templates (issue #15): a run job resolved from a saved request.
   | "template_run";
 

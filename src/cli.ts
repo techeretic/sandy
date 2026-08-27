@@ -218,6 +218,15 @@ function progressSink(enabled: boolean): (e: ProgressEvent) => void {
       case "parse-fallback":
         w(`  \u21b3 ${e.reason}`);
         break;
+      case "replan-started":
+        w(`\u21bb replanning (round ${e.round}/${e.maxRounds})`);
+        break;
+      case "replan-attempt-failed":
+        w(`  \u2717 replan round ${e.round} attempt ${e.attempt}: ${e.error}`);
+        break;
+      case "replan-stopped":
+        w(`  \u25a0 replan stopped (round ${e.round}): ${e.reason}`);
+        break;
       case "narrating":
         w(`\u270e narrating`);
         break;
@@ -283,6 +292,11 @@ function formatAskText(r: LoopResult, auditFile?: string): string {
   lines.push("Sandy ask");
   lines.push(`  goal:    ${r.goal}`);
   lines.push(`  plan:    ${r.plan.source}${r.plan.reason ? ` (${r.plan.reason})` : ""} after ${r.plan.attempts} attempt(s)`);
+  if (r.replanning) {
+    lines.push(
+      `  rounds:  ${r.replanning.rounds} gather round(s), stopped: ${r.replanning.stop} (issue #19)`,
+    );
+  }
   if (r.plan.source !== "refused" && r.request) {
     for (const t of r.request.gather) {
       lines.push(`    - ${t.id}: ${t.server}/${t.tool}`);
