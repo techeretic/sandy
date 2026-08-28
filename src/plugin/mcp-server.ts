@@ -37,7 +37,7 @@ export interface SandyMcpServerOptions {
 
 export function createSandyMcpServer(options: SandyMcpServerOptions): McpServer {
   const { api } = options;
-  const server = new McpServer({ name: "sandy", version: "0.1.1" });
+  const server = new McpServer({ name: "sandy", version: "0.1.2" });
 
   // Wrap a host-facing handler so its result is JSON-encoded into an MCP text
   // block, and any error is surfaced in-band (an LLM reads the tool result, so

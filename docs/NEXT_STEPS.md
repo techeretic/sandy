@@ -4,7 +4,7 @@ _Last updated 2026-08-27. Forward-looking only: the current state, what's built 
 
 ## Status
 
-**v0.1.1 (2026-08-23). Phase 1 and Phase 2 complete; the real bundled model is proven end-to-end. The Q6 approval-gated write path (issue #16) — core _and_ the approval-UX v2 half — is implemented on top.**
+**v0.1.2 (2026-08-27). Phase 1 and Phase 2 complete; the real bundled model is proven end-to-end. The Q6 approval-gated write path (issue #16) — core _and_ the approval-UX v2 half — is implemented on top.**
 
 - **308/308 tests**, typecheck + build green.
 - The launch success criterion — "zero network egress outside declared MCP endpoints" — is proven in-process and at the network level in Docker, and the enforcer is proven runtime-agnostic for **both** modes: the same config + request under Docker and Firejail produce byte-identical behavior for plugin (`sandy run`) and standalone (`sandy ask`), in a CI matrix.
@@ -36,7 +36,7 @@ Everything is exported from `src/index.ts`. Tests live in `tests/` (use `tests/h
 
 ## Remaining work (Phase 1 + Phase 2 complete — all §8 steps done)
 
-Everything that was in the original remaining-work list (CLI, plugin, egress conformance, sandbox conformance, engine seam, backends, loop, API, service, standalone conformance, real-model end-to-end) is **done and released in v0.1.1** — the write-ups are in `docs/DIARY.md`. What remains is the deferred product scope (per `docs/DECISIONS.md` + PRD §10) and optional hardening. Each is a tracked GitHub issue; the "where to start" notes below are the actionable substance.
+Everything that was in the original remaining-work list (CLI, plugin, egress conformance, sandbox conformance, engine seam, backends, loop, API, service, standalone conformance, real-model end-to-end) is **done and released in v0.1.1** — the write-ups are in `docs/DIARY.md`. The deferred product scope (per `docs/DECISIONS.md` + PRD §10) and the optional hardening are **now done and released in v0.1.2** (#14–#19 + the #16 approval-UX v2 half); the notes below are the record of what each covers and the genuinely-optional follow-ups that remain.
 
 ### Deferred product items
 
@@ -69,6 +69,7 @@ Everything that was in the original remaining-work list (CLI, plugin, egress con
 - TypeScript strict, ESM, Node ≥ 22. **Pin `typescript@5.9`** (7.x native compiler has a `@types/node` auto-include bug — see DIARY 2026-08-17 afternoon).
 - Run `npm run typecheck && npm test` after changes; `npm run build` for dist.
 - Update `docs/DIARY.md` per work block; keep `README.md`'s Status section current. **Doc roles (per issue #13):** DIARY = chronological history (append-only), NEXT_STEPS = forward-looking state + this roadmap, README = short headline status + links. Don't restate a milestone in more than one of them.
+- Commit style: conventional-commit prefixes (`feat:`, `fix:`, `docs:`, `test:`, `perf:`, `security:`, `release:`), imperative subject; after each completed task, commit + push to the remote (per `AGENTS.md`).
 
 ## Suggested first action for the next session
 
