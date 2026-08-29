@@ -1,7 +1,7 @@
 {
   "name": "Sandy",
   "description": "SANDBOXable AI assistant. The host LLM does the reasoning; Sandy executes — gathering data from declared internal services via MCP servers and writing provenance-tracked reports, all confined to your sandbox (no egress outside declared endpoints).",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "author": { "name": "Sandy" },
   "mcpServers": {
     "sandy": {
