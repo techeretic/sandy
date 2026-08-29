@@ -14,7 +14,7 @@ import {
   SandboxViolationError,
 } from "../sandbox/confinement.js";
 import { isIgnored, compilePatterns } from "./ignore.js";
-import { detectFormat, validateContent } from "./format.js";
+import { detectFormat, isBinaryFormat, validateBinaryContent, validateContent } from "./format.js";
 import {
   InMemoryJournal,
   type MutationJournal,
@@ -250,6 +250,64 @@ export class FileManager {
         });
 
     this.audit.record({ op: dryRun ? "write(dry-run)" : "write", path: abs, at: new Date().toISOString(), outcome: "ok", dryRun });
+    return { applied: !dryRun, path: abs, journaled };
+  }
+
+  /**
+   * Create or overwrite a BINARY file (FM-01/FM-08, issue #14): the DOCX/XLSX
+   * PDF report artifacts. Same confinement, ignore, confirmation gates,
+   * journaling, and audit as {@link write}, but the content is an opaque byte
+   * stream: it is validated by magic prefix (fail-closed), stored raw, and
+   * journaled as base64 (byte-exact on undo — the same guarantee the prior-
+   * bytes capture already has for pre-existing binaries).
+   */
+  async writeBinary(candidate: string, content: Buffer, options: FileOpOptions = {}): Promise<FileMutationResult> {
+    const abs = await this.confinement.resolve(candidate);
+    this.assertNotIgnored(abs, candidate);
+
+    const format = detectFormat(path.basename(abs));
+    if (!isBinaryFormat(format)) {
+      throw new FileOpError("format-invalid", candidate, `writeBinary expects a binary report name (.docx/.xlsx/.pdf); got "${path.basename(abs)}"`);
+    }
+    const formatError = validateBinaryContent(format, content);
+    if (formatError !== null) {
+      throw new FileOpError("format-invalid", candidate, formatError);
+    }
+
+    let existed = false;
+    let priorContent: string | null = null;
+    try {
+      await stat(abs);
+      existed = true;
+      priorContent = (await readFile(abs)).toString("base64");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+
+    if (existed) {
+      this.requireConfirmation("overwrite", candidate, `overwrite existing file ${abs}`, options);
+    } else if (this.policy.confirmation_required.includes("create")) {
+      this.requireConfirmation("create", candidate, `create new file ${abs}`, options);
+    }
+
+    const dryRun = options.dryRun ?? this.policy.dry_run_default;
+    if (!dryRun) {
+      await this.io(candidate, async () => {
+        await mkdir(path.dirname(abs), { recursive: true });
+        await writeFile(abs, content);
+      }, { notFound: `cannot write: ${abs}` });
+    }
+
+    const journaled = dryRun
+      ? undefined
+      : this.journal.record({
+          op: existed ? "write-file" : "create-file",
+          path: abs,
+          before: priorContent,
+          after: content.toString("base64"),
+        });
+
+    this.audit.record({ op: dryRun ? "write-binary(dry-run)" : "write-binary", path: abs, at: new Date().toISOString(), outcome: "ok", dryRun });
     return { applied: !dryRun, path: abs, journaled };
   }
 

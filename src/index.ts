@@ -89,9 +89,13 @@ export {
   isIgnoredByPatterns,
 } from "./files/ignore.js";
 export {
+  BINARY_FORMATS,
   detectFormat,
-  validateContent,
+  isBinaryFormat,
   SUPPORTED_FORMATS,
+  validateBinaryContent,
+  validateContent,
+  type BinaryFormat,
   type FileFormat,
 } from "./files/format.js";
 export {
@@ -142,12 +146,19 @@ export {
 } from "./orchestrator/templates.js";
 export {
   REPORT_FORMATS,
+  isBinaryReportFormat,
   reportFormatExtension,
   renderHtmlReport,
   renderMarkdownReport,
   renderReport,
+  renderReportArtifact,
   type ReportFormat,
 } from "./orchestrator/report.js";
+export { renderDocxReport } from "./orchestrator/docx.js";
+export { renderPdfReport } from "./orchestrator/pdf.js";
+export { renderXlsxReport } from "./orchestrator/xlsx.js";
+export { zipStore } from "./orchestrator/zip.js";
+export { escapeXml } from "./orchestrator/xml.js";
 export {
   createOrchestrator,
   type OrchestratorFactoryOptions,

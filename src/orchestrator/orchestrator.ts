@@ -3,7 +3,14 @@ import type { McpClientManager } from "../mcp/manager.js";
 import { McpCallError } from "../mcp/types.js";
 import type { AuditLogger } from "../audit/logger.js";
 import { captureTranscript, type Transcript } from "../audit/transcript.js";
-import { renderMarkdownReport, renderReport, reportFormatExtension, type ReportFormat } from "./report.js";
+import {
+  isBinaryReportFormat,
+  renderMarkdownReport,
+  renderReport,
+  renderReportArtifact,
+  reportFormatExtension,
+  type ReportFormat,
+} from "./report.js";
 import {
   logWriteAttempt,
   ReadOnlyGate,
@@ -112,7 +119,14 @@ export interface OrchestratorResult {
   claims: Claim[];
   gaps: Gap[];
   reportPath?: string;
+  /** The rendered report content for a TEXT format (markdown/html). */
   reportContent?: string;
+  /**
+   * The rendered report artifact as base64 bytes (issue #14): present for
+   * every format, so a binary format (docx/xlsx/pdf) carries its on-disk
+   * bytes in-band instead of a (non-UTF-8) string.
+   */
+  reportArtifactB64?: string;
   /** Set when report rendering succeeded but writing it to disk failed
    *  (e.g. a format/extension mismatch) -- claims/gaps are still returned. */
   reportError?: string;
@@ -146,6 +160,12 @@ export interface OrchestratorOptions {
   renderReport?: (input: RenderReportInput) => string;
   /** Writes the rendered report to disk (confined by the File Manager). Returns the path. */
   writeReport?: (content: string, file: string) => Promise<string>;
+  /**
+   * Writes a BINARY report artifact to disk (issue #14: docx/xlsx/pdf —
+   * written through the File Manager's byte-exact `writeBinary`). Used only
+   * for binary formats; text formats go through `writeReport`.
+   */
+  writeBinaryReport?: (bytes: Buffer, file: string) => Promise<string>;
   /**
    * The gate every write task must pass before reaching a server (Q6).
    * Defaults to {@link ReadOnlyGate} — refuse all writes — so a deployment
@@ -212,6 +232,7 @@ export class Orchestrator {
   private readonly reportFormat: ReportFormat;
   private readonly renderReport: (input: RenderReportInput) => string;
   private readonly writeReport: ((content: string, file: string) => Promise<string>) | null;
+  private readonly writeBinaryReport: ((bytes: Buffer, file: string) => Promise<string>) | null;
   private readonly writeGate: WriteApprovalGate;
 
   constructor(options: OrchestratorOptions) {
@@ -224,6 +245,7 @@ export class Orchestrator {
     // otherwise the default renderer is bound to the configured format.
     this.renderReport = options.renderReport ?? ((input) => renderReport(this.reportFormat, input));
     this.writeReport = options.writeReport ?? null;
+    this.writeBinaryReport = options.writeBinaryReport ?? null;
     // Fail closed: a deployment that has not supplied a gate refuses every
     // write (the v1 read-and-report default, Q6).
     this.writeGate = options.writeGate ?? new ReadOnlyGate();
@@ -290,24 +312,50 @@ export class Orchestrator {
 
     let reportPath: string | undefined;
     let reportContent: string | undefined;
+    let reportArtifactB64: string | undefined;
     let reportError: string | undefined;
     if (request.report) {
       const generatedAt = new Date().toISOString();
-      reportContent = this.renderReport({
+      const renderInput = {
         goal: request.goal,
         title: request.report.title ?? request.goal,
         claims,
         gaps,
         generatedAt,
         summary: request.report.summary,
-      });
+      };
+      // Binary formats (issue #14): render the on-disk artifact as bytes and
+      // carry it in-band (base64) — a binary report has no lossless UTF-8
+      // string form. Text formats keep the string path.
+      const binary = isBinaryReportFormat(this.reportFormat);
+      const bytes = binary ? renderReportArtifact(this.reportFormat, renderInput) : null;
+      if (bytes !== null) {
+        reportArtifactB64 = bytes.toString("base64");
+      } else {
+        reportContent = this.renderReport(renderInput);
+      }
       // The default filename's extension follows the report format (issue
       // #14); an explicit `file` in the request is honored as-is.
       const file = request.report.file ?? `report-${Date.now()}${reportFormatExtension(this.reportFormat)}`;
       this.onProgress({ type: "report-writing", path: file });
-      if (this.writeReport) {
+      if (binary) {
+        if (this.writeBinaryReport) {
+          try {
+            reportPath = await this.writeBinaryReport(bytes as Buffer, file);
+          } catch (err) {
+            reportError = err instanceof Error ? err.message : String(err);
+            this.audit.append("orchestrator_task", {
+              task: "report-write",
+              server: "sandy",
+              tool: "write-report",
+              outcome: "error",
+              error: reportError,
+            });
+          }
+        }
+      } else if (this.writeReport) {
         try {
-          reportPath = await this.writeReport(reportContent, file);
+          reportPath = await this.writeReport(reportContent as string, file);
         } catch (err) {
           // A filename/format choice must not discard the data already
           // gathered from (potentially many) successful MCP calls: surface the
@@ -327,7 +375,7 @@ export class Orchestrator {
     this.onProgress({ type: "done", claims: claims.length, gaps: gaps.length });
     this.audit.append("session_end", { claims: claims.length, gaps: gaps.length, report: reportPath ?? null, reportError: reportError ?? null });
 
-    return { goal: request.goal, claims, gaps, reportPath, reportContent, reportError, transcript: captureTranscript(this.audit) };
+    return { goal: request.goal, claims, gaps, reportPath, reportContent, reportArtifactB64, reportError, transcript: captureTranscript(this.audit) };
   }
 
   /**

@@ -9,6 +9,8 @@ import {
   PathConfinement,
   SandboxViolationError,
   detectFormat,
+  isBinaryFormat,
+  validateBinaryContent,
   validateContent,
   isIgnoredByPatterns,
   type PolicyConfig,
@@ -276,7 +278,21 @@ describe("FileManager: formats (FM-08)", () => {
     expect(detectFormat("a.md")).toBe("markdown");
     expect(detectFormat("a.csv")).toBe("csv");
     expect(detectFormat("a.json")).toBe("json");
+    expect(detectFormat("a.docx")).toBe("docx");
+    expect(detectFormat("a.xlsx")).toBe("xlsx");
+    expect(detectFormat("a.pdf")).toBe("pdf");
     expect(detectFormat("a.xyz")).toBe("text");
+    expect(isBinaryFormat(detectFormat("a.docx"))).toBe(true);
+    expect(isBinaryFormat(detectFormat("a.pdf"))).toBe(true);
+    expect(isBinaryFormat(detectFormat("a.txt"))).toBe(false);
+  });
+
+  it("validates binary content by magic prefix (fail-closed on mismatch)", () => {
+    expect(validateBinaryContent("docx", Buffer.from([0x50, 0x4b, 0x03, 0x04]))).toBeNull();
+    expect(validateBinaryContent("xlsx", Buffer.from([0x50, 0x4b, 0x05, 0x06]))).toBeNull();
+    expect(validateBinaryContent("pdf", Buffer.from("%PDF-1.4"))).toBeNull();
+    expect(validateBinaryContent("docx", Buffer.from("not a zip"))).toMatch(/ZIP/);
+    expect(validateBinaryContent("pdf", Buffer.from("not a pdf"))).toMatch(/%PDF-/);
   });
 
   it("rejects invalid JSON content on write", async () => {
@@ -389,6 +405,53 @@ describe("FileManager: undo journal (FM-05)", () => {
     await fm.undo();
     expect((await readFile(p)).equals(binary)).toBe(true);
     expect(await readFile(path.join(workspace, "bin-tree/notes.txt"), "utf8")).toBe("text");
+  });
+
+  it("writeBinary stores a binary report byte-exactly and undo restores the prior bytes (FM-08, issue #14)", async () => {
+    const fm = manager();
+    const pdf = Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.from([0xff, 0xfe, 0x00, 0x01, 0x80])]);
+    const docx = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.from("docx-part")]);
+    await fm.writeBinary("rep.pdf", pdf);
+    await fm.writeBinary("rep.docx", docx);
+    expect((await readFile(path.join(workspace, "rep.pdf"))).equals(pdf)).toBe(true);
+    expect((await readFile(path.join(workspace, "rep.docx"))).equals(docx)).toBe(true);
+    // Overwrite (confirmed) and undo: the PRIOR bytes come back exactly.
+    await fm.writeBinary("rep.pdf", Buffer.from("%PDF-1.5\nchanged"), { confirmed: true });
+    const undone = await fm.undo();
+    expect(undone?.op).toBe("write-file");
+    expect((await readFile(path.join(workspace, "rep.pdf"))).equals(pdf)).toBe(true);
+  });
+
+  it("writeBinary refuses invalid magic bytes fail-closed (FM-08)", async () => {
+    const fm = manager();
+    // A PDF named .pdf but not actually PDF.
+    await expect(fm.writeBinary("bad.pdf", Buffer.from("not a pdf"))).rejects.toThrow(
+      /format-invalid/,
+    );
+    // A DOCX named .docx but not a ZIP container.
+    await expect(fm.writeBinary("bad.docx", Buffer.from("plain text"))).rejects.toThrow(
+      /format-invalid/,
+    );
+    expect(await existsAny(path.join(workspace, "bad.pdf"))).toBe(false);
+  });
+
+  it("writeBinary refuses a non-binary name; write() refuses a binary name (FM-08)", async () => {
+    const fm = manager();
+    await expect(fm.writeBinary("notbinary.txt", Buffer.from("x"))).rejects.toThrow(
+      /format-invalid/,
+    );
+    // A TEXT write to a binary report name would produce a corrupt artifact.
+    await expect(fm.write("corrupt.docx", "hello")).rejects.toThrow(/writeBinary/);
+    await expect(fm.write("corrupt.xlsx", "hello")).rejects.toThrow(/writeBinary/);
+    await expect(fm.write("corrupt.pdf", "hello")).rejects.toThrow(/writeBinary/);
+  });
+
+  it("writeBinary respects the overwrite confirmation gate (FM-04)", async () => {
+    const fm = manager();
+    await fm.writeBinary("gate.pdf", Buffer.from("%PDF-1.4\none"));
+    await expect(
+      fm.writeBinary("gate.pdf", Buffer.from("%PDF-1.4\ntwo")),
+    ).rejects.toThrow(ConfirmationRequiredError);
   });
 
   it("undo() produces an audit record (AU-01)", async () => {

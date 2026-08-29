@@ -139,9 +139,10 @@ export async function loadSandyConfig(
   }
   const config = mainResult.data;
 
-  // Fail closed on an unimplemented report format (issue #14): the schema
-  // accepts markdown|html|docx|xlsx|pdf, but only the first two are rendered.
-  // An unimplemented format is a config error, never a silent Markdown fallback.
+  // Fail closed on a report format the renderer cannot produce (issue #14):
+  // the schema and REPORT_FORMATS both declare markdown|html|docx|xlsx|pdf,
+  // so this guard is defense in depth — it stays fail-closed (a config
+  // error, never a silent Markdown fallback) if the two ever diverge.
   const requestedFormat = config.preferences?.default_report_format ?? "markdown";
   if (!(REPORT_FORMATS as readonly string[]).includes(requestedFormat)) {
     throw new ConfigError(

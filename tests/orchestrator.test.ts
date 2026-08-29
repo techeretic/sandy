@@ -13,9 +13,14 @@ import {
   transcriptToMarkdown,
   renderMarkdownReport,
   renderReport,
+  renderReportArtifact,
   renderHtmlReport,
+  renderDocxReport,
+  renderXlsxReport,
+  renderPdfReport,
   reportFormatExtension,
   REPORT_FORMATS,
+  isBinaryReportFormat,
   Orchestrator,
   PolicyApprovalGate,
   ReadOnlyGate,
@@ -395,16 +400,127 @@ describe("Report formats (issue #14): claims/provenance survive the transform", 
     expect(html).toContain("Quarterly &lt;Q&gt;");
   });
 
-  it("renderReport dispatches to the right renderer per format", () => {
+  it("renderReport dispatches to the right renderer per text format", () => {
     expect(renderReport("markdown", input)).toBe(renderMarkdownReport(input));
     expect(renderReport("html", input)).toBe(renderHtmlReport(input));
+    // renderReport is text-only: binary formats are an artifact (bytes), not a
+    // (non-UTF-8) string.
+    expect(() => renderReport("docx", input)).toThrow(/renderReportArtifact/);
+    expect(isBinaryReportFormat("docx")).toBe(true);
+    expect(isBinaryReportFormat("xlsx")).toBe(true);
+    expect(isBinaryReportFormat("pdf")).toBe(true);
+    expect(isBinaryReportFormat("markdown")).toBe(false);
+    expect(isBinaryReportFormat("html")).toBe(false);
+  });
+
+  it("renderReportArtifact dispatches to the right renderer per format", () => {
+    expect(renderReportArtifact("markdown", input).toString("utf8")).toBe(renderMarkdownReport(input));
+    expect(renderReportArtifact("html", input).toString("utf8")).toBe(renderHtmlReport(input));
+    expect(renderReportArtifact("docx", input).equals(renderDocxReport(input))).toBe(true);
+    expect(renderReportArtifact("xlsx", input).equals(renderXlsxReport(input))).toBe(true);
+    expect(renderReportArtifact("pdf", input).equals(renderPdfReport(input))).toBe(true);
   });
 
   it("reportFormatExtension maps each supported format to its file extension", () => {
     expect(reportFormatExtension("markdown")).toBe(".md");
     expect(reportFormatExtension("html")).toBe(".html");
-    // The dispatcher only knows the implemented formats.
-    expect(REPORT_FORMATS).toEqual(["markdown", "html"]);
+    expect(reportFormatExtension("docx")).toBe(".docx");
+    expect(reportFormatExtension("xlsx")).toBe(".xlsx");
+    expect(reportFormatExtension("pdf")).toBe(".pdf");
+    // The registry is exactly the set the loader admits (fail-closed).
+    expect(REPORT_FORMATS).toEqual(["markdown", "html", "docx", "xlsx", "pdf"]);
+  });
+
+  it("docx keeps every claim, gap, and provenance entry (same content, new presentation)", () => {
+    const docx = renderDocxReport(input).toString("latin1");
+    expect(docx).toContain("Quarterly &lt;Q&gt;"); // title XML-escaped
+    // The claim text survives, escaped for XML; the ref is attached.
+    expect(docx).toContain("3 deals closed in EMEA &lt;this &amp; that&gt;");
+    expect(docx).toContain("[1]");
+    expect(docx).toContain("crm");
+    expect(docx).toContain("read_deals");
+    expect(docx).toContain("abc123"); // provenance table
+    // Gaps are explicit, never smoothed over.
+    expect(docx).toContain("jira/read_issues");
+    expect(docx).toContain("call failed");
+    expect(docx).toContain("boom");
+    // A summary, when present, is clearly labeled.
+    const withSummary = renderDocxReport({ ...input, summary: "Narrative." }).toString("latin1");
+    expect(withSummary).toContain("model narrative");
+    expect(withSummary).toContain("Narrative.");
+  });
+
+  it("docx is a valid ZIP (OPC) container with the expected parts", () => {
+    const bytes = renderDocxReport(input);
+    expect(bytes[0]).toBe(0x50); // PK
+    expect(bytes[1]).toBe(0x4b);
+    const names = zipEntryNames(bytes);
+    expect(names).toContain("[Content_Types].xml");
+    expect(names).toContain("word/document.xml");
+    const document = zipEntryData(bytes, "word/document.xml");
+    expect(document.toString("utf8")).toContain("<w:document");
+  });
+
+  it("xlsx keeps every claim, gap, and provenance entry (same content, new presentation)", () => {
+    const names = zipEntryNames(renderXlsxReport(input));
+    expect(names).toContain("xl/workbook.xml");
+    // The sheet names are wired in the workbook.
+    const workbook = zipEntryData(renderXlsxReport(input), "xl/workbook.xml").toString("utf8");
+    expect(workbook).toContain("name=\"Findings\"");
+    expect(workbook).toContain("name=\"Gaps\"");
+    expect(workbook).toContain("name=\"Provenance\"");
+    // Findings: the claim text (escaped) and its ref.
+    const findings = zipEntryData(renderXlsxReport(input), sheetByTitle(renderXlsxReport(input), "Findings")).toString("latin1");
+    expect(findings).toContain("3 deals closed in EMEA &lt;this &amp; that&gt;");
+    expect(findings).toContain("deals"); // the task name
+    // Gaps: the explicit hole, with reason + detail.
+    const gaps = zipEntryData(renderXlsxReport(input), sheetByTitle(renderXlsxReport(input), "Gaps")).toString("latin1");
+    expect(gaps).toContain("jira");
+    expect(gaps).toContain("read_issues");
+    expect(gaps).toContain("call failed");
+    expect(gaps).toContain("boom");
+    // Provenance: the same source data as every other format.
+    const provenance = zipEntryData(renderXlsxReport(input), sheetByTitle(renderXlsxReport(input), "Provenance")).toString("latin1");
+    expect(provenance).toContain("crm");
+    expect(provenance).toContain("read_deals");
+    expect(provenance).toContain("abc123");
+  });
+
+  it("pdf keeps every claim, gap, and provenance entry (same content, new presentation)", () => {
+    const pdf = renderPdfReport(input).toString("latin1");
+    expect(pdf.startsWith("%PDF-1.4")).toBe(true);
+    expect(pdf.trimEnd().endsWith("%%EOF")).toBe(true);
+    expect(pdf).toContain("/Count 1");
+    expect(pdf).toContain("Helvetica");
+    // Claim text: in a PDF literal string only ( ) \ are escaped, so < > &
+    // survive as literals. Its ref, and the provenance entry.
+    expect(pdf).toContain("3 deals closed in EMEA <this & that> [1]");
+    expect(pdf).toContain("[1]");
+    expect(pdf).toContain("crm/read_deals");
+    expect(pdf).toContain("abc123");
+    // Gaps are explicit, never smoothed over.
+    expect(pdf).toContain("jira/read_issues");
+    expect(pdf).toContain("call failed");
+    expect(pdf).toContain("boom");
+    // A summary, when present, is clearly labeled.
+    const withSummary = renderPdfReport({ ...input, summary: "Narrative." }).toString("latin1");
+    expect(withSummary).toContain("model narrative");
+    expect(withSummary).toContain("Narrative.");
+  });
+
+  it("pdf paginates: a long report flows to more than one page, deterministically", () => {
+    const manyClaims: Claim[] = Array.from({ length: 40 }, (_, i) => ({
+      ref: i + 1,
+      text: `Claim number ${i + 1} with some padding text to fill the page.`,
+      source: { task: "t", server: "crm", tool: "read_deals", argsHash: "abc123", at: "2026-08-17T00:00:00Z" },
+    }));
+    const long = { goal: "q", title: "Long", claims: manyClaims, gaps: [] as Gap[], generatedAt: "x" };
+    const pdf = renderPdfReport(long).toString("latin1");
+    // More than one page (the flow wrapped past the A4 height).
+    const count = Number(pdf.match(/\/Count (\d+)/)?.[1]);
+    expect(count).toBeGreaterThanOrEqual(2);
+    // Determinism: same (claims, gaps) → byte-identical document.
+    expect(renderPdfReport(long).equals(renderPdfReport(long))).toBe(true);
   });
 });
 
@@ -1111,6 +1227,65 @@ describe("Orchestrator: end-to-end with report writing", () => {
     servers = [];
   });
 
+  it("createOrchestrator writes binary reports (docx/xlsx/pdf) through the real File Manager (issue #14)", async () => {
+    for (const format of ["docx", "xlsx", "pdf"] as const) {
+      const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }]);
+      servers = [crm];
+      const manager = new McpClientManager(
+        [serverConfig("crm", ["read_deals"])],
+        resolver,
+        guard,
+        { retry: instantRetry, transportFactory: () => crm.transport },
+      );
+      await manager.connectAll();
+
+      const files = new FileManager({
+        confinement: new PathConfinement([dir]),
+        policy: {
+          confirmation_required: ["delete", "overwrite"],
+          undo_depth: 0,
+          dry_run_default: false,
+          audit_payload_logging: false,
+          ignore_patterns: [],
+          approval_ttl_seconds: 1800,
+        },
+      });
+      const audit = new InMemoryAuditLogger();
+      const orch = createOrchestrator({
+        manager,
+        audit,
+        files,
+        reportDir: dir,
+        reportFormat: format,
+      });
+
+      // No explicit file: the default name takes the format's extension.
+      const result = await orch.run({
+        goal: "deals report",
+        gather: [{ id: "deals", server: "crm", tool: "read_deals", args: { region: "emea" } }],
+        report: { title: "EMEA Deals" },
+      });
+
+      expect(result.reportError).toBeUndefined();
+      expect(result.reportPath).toMatch(new RegExp(`\\.${format}$`));
+      // The artifact is carried in-band as base64, never a (non-UTF-8) string.
+      expect(result.reportArtifactB64).toBeTruthy();
+      expect(result.reportContent).toBeUndefined();
+      const onDisk = await readFile(result.reportPath!);
+      expect(onDisk.equals(Buffer.from(result.reportArtifactB64!, "base64"))).toBe(true);
+      // The on-disk bytes are the valid artifact for that format.
+      if (format === "pdf") {
+        expect(onDisk.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+      } else {
+        expect(onDisk[0]).toBe(0x50); // PK (ZIP)
+        expect(onDisk[1]).toBe(0x4b);
+      }
+      await manager.close();
+      for (const s of servers) await s.close();
+      servers = [];
+    }
+  });
+
   it("run() returns already-gathered claims/gaps even if the report write fails", async () => {
     const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }]);
     servers = [crm];
@@ -1158,3 +1333,61 @@ describe("Orchestrator: end-to-end with report writing", () => {
     servers = [];
   });
 });
+
+// --- ZIP (OPC container) test helpers ----------------------------------------
+// A minimal reader for the STORE-only archives the binary renderers produce,
+// so the tests can assert the container is valid and the parts are intact.
+
+function zipEntryNames(bytes: Buffer): string[] {
+  const centralStart = bytes.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  if (centralStart === -1) throw new Error("no end-of-central-directory record");
+  const count = bytes.readUInt16LE(centralStart + 10);
+  let offset = bytes.readUInt32LE(centralStart + 16);
+  const names: string[] = [];
+  for (let i = 0; i < count; i++) {
+    if (bytes.readUInt32LE(offset) !== 0x02014b50) throw new Error("bad central directory signature");
+    const nameLen = bytes.readUInt16LE(offset + 28);
+    const extraLen = bytes.readUInt16LE(offset + 30);
+    const commentLen = bytes.readUInt16LE(offset + 32);
+    names.push(bytes.subarray(offset + 46, offset + 46 + nameLen).toString("utf8"));
+    offset += 46 + nameLen + extraLen + commentLen;
+  }
+  return names;
+}
+
+function zipEntryData(bytes: Buffer, name: string): Buffer {
+  const centralStart = bytes.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  if (centralStart === -1) throw new Error("no end-of-central-directory record");
+  const count = bytes.readUInt16LE(centralStart + 10);
+  let offset = bytes.readUInt32LE(centralStart + 16);
+  for (let i = 0; i < count; i++) {
+    if (bytes.readUInt32LE(offset) !== 0x02014b50) throw new Error("bad central directory signature");
+    const nameLen = bytes.readUInt16LE(offset + 28);
+    const extraLen = bytes.readUInt16LE(offset + 30);
+    const commentLen = bytes.readUInt16LE(offset + 32);
+    const entryName = bytes.subarray(offset + 46, offset + 46 + nameLen).toString("utf8");
+    const localOffset = bytes.readUInt32LE(offset + 42);
+    if (entryName === name) {
+      const localNameLen = bytes.readUInt16LE(localOffset + 26);
+      const localExtraLen = bytes.readUInt16LE(localOffset + 28);
+      const size = bytes.readUInt32LE(localOffset + 18);
+      return bytes.subarray(
+        localOffset + 30 + localNameLen + localExtraLen,
+        localOffset + 30 + localNameLen + localExtraLen + size,
+      );
+    }
+    offset += 46 + nameLen + extraLen + commentLen;
+  }
+  throw new Error(`no entry named ${name}`);
+}
+
+/** Map a worksheet title to its sheetN.xml part (via the workbook rels). */
+function sheetByTitle(bytes: Buffer, title: string): string {
+  const workbook = zipEntryData(bytes, "xl/workbook.xml").toString("utf8");
+  const match = workbook.match(new RegExp(`name="${title}" sheetId="\\d+" r:id="(rId\\d+)"`));
+  if (!match) throw new Error(`no sheet named ${title}`);
+  const rels = zipEntryData(bytes, "xl/_rels/workbook.xml.rels").toString("utf8");
+  const relMatch = rels.match(new RegExp(`Id="${match[1]}"[^>]*Target="([^"]+)"`));
+  if (!relMatch) throw new Error(`no rel for ${match[1]}`);
+  return `xl/${relMatch[1]}`;
+}

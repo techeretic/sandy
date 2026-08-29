@@ -15,7 +15,12 @@ import {
   type OrchestratorRequestInput,
 } from "../orchestrator/request.js";
 import { validateRequest, type ToolRef } from "../orchestrator/templates.js";
-import { renderReport, type ReportFormat } from "../orchestrator/report.js";
+import {
+  isBinaryReportFormat,
+  renderReport,
+  renderReportArtifact,
+  type ReportFormat,
+} from "../orchestrator/report.js";
 import type { AuditLogger } from "../audit/logger.js";
 import { captureTranscript, type Transcript } from "../audit/transcript.js";
 import type { FileManager } from "../files/file-manager.js";
@@ -91,7 +96,12 @@ export interface LoopResult {
   claims: Claim[];
   gaps: Gap[];
   reportPath?: string;
+  /** The rendered report content for a TEXT format (markdown/html). */
   reportContent?: string;
+  /** The rendered report artifact as base64 bytes (issue #14): present for
+   *  every format, so a binary format (docx/xlsx/pdf) carries its on-disk
+   *  bytes in-band instead of a (non-UTF-8) string. */
+  reportArtifactB64?: string;
   transcript: Transcript;
   /** How the round-1 plan was produced (model / deterministic fallback / refused). */
   plan: {
@@ -315,6 +325,7 @@ export class AutonomousLoop {
     const gaps: Gap[] = [...first.gaps];
     let reportPath = first.reportPath;
     let reportContent = first.reportContent;
+    let reportArtifactB64 = first.reportArtifactB64;
     // Every call the loop has already made — the model may never re-propose one
     // (a "plan" that only re-gathers known calls is nothing new, not a round).
     const knownCalls = new Set(request.gather.map((t) => callSignature(t.server, t.tool, t.args)));
@@ -389,28 +400,38 @@ export class AutonomousLoop {
         this.onProgress({ type: "replan-stopped", round: rounds, reason: "max-rounds" });
       }
       // No round beyond the first ran: the report round 1 wrote IS the
-      // consolidated report — nothing to renumber or re-render.
-      if (rounds > 1 && reportPath && reportContent !== undefined) {
+      // consolidated report — nothing to renumber or re-render. A report
+      // exists when round 1 produced its content — as a string (text format)
+      // or as the artifact bytes (binary format, issue #14).
+      if (rounds > 1 && reportPath && (reportContent !== undefined || reportArtifactB64 !== undefined)) {
         // Each `orchestrator.run` numbers its claims from 1, so the merged
         // claims across rounds have duplicate refs (and the consolidated report
         // would carry duplicate footnotes). Renumber the consolidated sequence
         // — provenance (source) is untouched; only the footnote numbers move.
         for (let i = 0; i < claims.length; i++) claims[i] = { ...claims[i]!, ref: i + 1 };
         // One report per ask: re-render the consolidated (claims, gaps) into
-        // the report round 1 wrote. Best-effort — a failure to re-write here
-        // does not discard the gathered data (the claims/gaps are returned
-        // regardless).
+        // the report round 1 wrote — text formats as a string, binary formats
+        // (issue #14) as the on-disk artifact bytes (byte-exact write).
+        // Best-effort — a failure to re-write here does not discard the
+        // gathered data (the claims/gaps are returned regardless).
         const consolidatedPath = reportPath;
+        const consolidatedInput = {
+          goal,
+          title,
+          claims,
+          gaps,
+          generatedAt: new Date().toISOString(),
+        };
         try {
-          const content = renderReport(this.reportFormat, {
-            goal,
-            title,
-            claims,
-            gaps,
-            generatedAt: new Date().toISOString(),
-          });
-          await this.files.write(consolidatedPath, content, { confirmed: true });
-          reportContent = content;
+          if (isBinaryReportFormat(this.reportFormat)) {
+            const bytes = renderReportArtifact(this.reportFormat, consolidatedInput);
+            await this.files.writeBinary(consolidatedPath, bytes, { confirmed: true });
+            reportArtifactB64 = bytes.toString("base64");
+          } else {
+            const content = renderReport(this.reportFormat, consolidatedInput);
+            await this.files.write(consolidatedPath, content, { confirmed: true });
+            reportContent = content;
+          }
           this.audit.append("standalone_replan", { round: rounds, outcome: "consolidated", report: consolidatedPath });
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err);
@@ -430,6 +451,7 @@ export class AutonomousLoop {
       gaps,
       reportPath,
       reportContent,
+      reportArtifactB64,
       transcript: first.transcript,
       plan,
       request,
@@ -447,11 +469,12 @@ export class AutonomousLoop {
     // Narrate (optional): a clearly-labeled model summary of the claims, re-
     // rendered into the report's Summary slot. Degrades gracefully on a dead
     // model — the deterministic report already written stands.
-    if (this.narrateEnabled && reportPath && reportContent) {
+    if (this.narrateEnabled && reportPath && (reportContent !== undefined || reportArtifactB64 !== undefined)) {
       const narrated = await this.narrate(goal, title, claims, gaps, reportPath);
       if (narrated) {
         loopResult.narrative = narrated.narrative;
-        loopResult.reportContent = narrated.content;
+        if (narrated.content !== undefined) loopResult.reportContent = narrated.content;
+        if (narrated.artifactB64 !== undefined) loopResult.reportArtifactB64 = narrated.artifactB64;
       }
     }
 
@@ -713,7 +736,13 @@ export class AutonomousLoop {
     claims: Claim[],
     gaps: Gap[],
     reportPath: string,
-  ): Promise<{ narrative: NonNullable<LoopResult["narrative"]>; content: string } | null> {
+  ): Promise<{
+    narrative: NonNullable<LoopResult["narrative"]>;
+    /** The re-rendered report (text format). */
+    content?: string;
+    /** The re-rendered report artifact, base64 (binary format, issue #14). */
+    artifactB64?: string;
+  } | null> {
     this.onProgress({ type: "narrating" });
     let completion: string;
     let inputTokens: number | undefined;
@@ -738,16 +767,26 @@ export class AutonomousLoop {
 
     // Re-render in the configured format (issue #14): the narrative fills the
     // Summary slot, but the format matches what the orchestrator wrote, so the
-    // re-written report is the same kind of file.
-    const content = renderReport(this.reportFormat, {
+    // re-written report is the same kind of file — text as a string, binary
+    // (docx/xlsx/pdf) as the artifact bytes.
+    const rendered = {
       goal,
       title,
       claims,
       gaps,
       generatedAt: new Date().toISOString(),
       summary: completion,
-    });
-    await this.files.write(reportPath, content, { confirmed: true });
+    };
+    let content: string | undefined;
+    let artifactB64: string | undefined;
+    if (isBinaryReportFormat(this.reportFormat)) {
+      const bytes = renderReportArtifact(this.reportFormat, rendered);
+      await this.files.writeBinary(reportPath, bytes, { confirmed: true });
+      artifactB64 = bytes.toString("base64");
+    } else {
+      content = renderReport(this.reportFormat, rendered);
+      await this.files.write(reportPath, content, { confirmed: true });
+    }
     this.audit.append("standalone_narrate", {
       outcome: "ok",
       ...(inputTokens !== undefined ? { inputTokens } : {}),
@@ -760,7 +799,8 @@ export class AutonomousLoop {
         ...(inputTokens !== undefined ? { inputTokens } : {}),
         ...(outputTokens !== undefined ? { outputTokens } : {}),
       },
-      content,
+      ...(content !== undefined ? { content } : {}),
+      ...(artifactB64 !== undefined ? { artifactB64 } : {}),
     };
   }
 }

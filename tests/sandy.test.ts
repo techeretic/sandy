@@ -278,16 +278,49 @@ describe("createSandy: composition (CLI/service spine)", () => {
     }
   });
 
-  it("refuses to start when preferences.default_report_format is unimplemented (fail-closed)", async () => {
-    const ws = await tmpWorkspace();
+  it("renders binary reports (docx/xlsx/pdf) end-to-end when configured (issue #14)", async () => {
     for (const format of ["docx", "xlsx", "pdf"]) {
+      const ws = await tmpWorkspace();
       const cfg = await writeConfig(ws, {
         allowedPaths: [ws],
         preferences: { default_report_format: format },
       });
-      await expect(createSandy({ sandyPath: cfg, detection: pinnedDetection })).rejects.toThrow(
-        /default_report_format/,
-      );
+      const crm = await makeInMemoryServer("crm", [{ name: "read_deals" }]);
+      inMemServers.push(crm);
+
+      const sandy = await createSandy({
+        sandyPath: cfg,
+        transportFactory: () => crm.transport,
+        detection: pinnedDetection,
+      });
+      try {
+        const result = await sandy.run({
+          goal: "EMEA deals summary",
+          gather: [{ id: "deals", server: "crm", tool: "read_deals", args: { region: "emea" } }],
+          report: { title: "EMEA Deals" },
+        });
+
+        // The default filename takes the format's extension; the on-disk bytes
+        // are the valid artifact (never a lossy UTF-8 round-trip).
+        expect(result.reportPath).toMatch(new RegExp(`\\.${format}$`));
+        const onDisk = await fsRead(result.reportPath!);
+        if (format === "pdf") {
+          expect(onDisk.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+          expect(onDisk.toString("latin1")).toContain("EMEA Deals");
+        } else {
+          expect(onDisk.subarray(0, 2).toString("latin1")).toBe("PK");
+          // The claim text + provenance survive into the container (XML-escaped
+          // inside the XML parts).
+          const raw = onDisk.toString("latin1");
+          expect(raw).toContain("EMEA Deals");
+          expect(raw).toContain("crm");
+          expect(raw).toContain("read_deals");
+        }
+        // The artifact is carried in-band as base64.
+        expect(Buffer.from(result.reportArtifactB64!, "base64").equals(onDisk)).toBe(true);
+      } finally {
+        await closeAll([sandy]);
+      }
     }
   });
 

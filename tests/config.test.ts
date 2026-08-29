@@ -180,18 +180,17 @@ describe("loadSandyConfig", () => {
     }
   });
 
-  it("fails closed on an unimplemented default_report_format (docx/xlsx/pdf, issue #14)", async () => {
-    for (const format of ["docx", "xlsx", "pdf"]) {
+  it("admits every implemented default_report_format (markdown/html/docx/xlsx/pdf, issue #14)", async () => {
+    for (const format of ["markdown", "html", "docx", "xlsx", "pdf"]) {
       const main = {
         ...validMain,
         preferences: { ...validMain.preferences, default_report_format: format },
       };
       const { dir, sandyPath } = await makeFixture(main, validManifest);
       try {
-        const result = await loadSandyConfig(sandyPath, env).catch((e) => e);
-        expect(result).toBeInstanceOf(ConfigError);
-        expect((result as Error).message).toContain(format);
-        expect((result as Error).message).toMatch(/not supported yet/);
+        const loaded = await loadSandyConfig(sandyPath, env);
+        // The narrowed type: a format the renderer can actually produce.
+        expect(loaded.reportFormat).toBe(format);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

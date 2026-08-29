@@ -37,7 +37,7 @@ async function tmpWorkspace(): Promise<string> {
   return dir;
 }
 
-async function writeConfig(dir: string, allowedPaths: string[]): Promise<string> {
+async function writeConfig(dir: string, allowedPaths: string[], preferences?: Record<string, unknown>): Promise<string> {
   const crm = {
     name: "crm",
     transport: "stdio",
@@ -66,6 +66,7 @@ async function writeConfig(dir: string, allowedPaths: string[]): Promise<string>
       audit_payload_logging: false,
       ignore_patterns: [],
     },
+    ...(preferences !== undefined ? { preferences } : {}),
   };
   await writeFile(path.join(dir, "mcp-servers.json"), JSON.stringify(manifest, null, 2));
   const cfgPath = path.join(dir, "sandy.json");
@@ -201,6 +202,48 @@ describe("AutonomousLoop (Phase 2, design §2.1)", () => {
       expect((planEvent.data as Record<string, unknown>)["source"]).toBe("model");
     } finally {
       await closeAll([sandy]);
+    }
+  });
+
+  it("happy path in a binary format: the ask report is a valid artifact with the narrative (issue #14)", async () => {
+    for (const format of ["docx", "xlsx", "pdf"]) {
+      const ws = await tmpWorkspace();
+      const cfg = await writeConfig(ws, [ws], { default_report_format: format });
+      const transport = await crmServer();
+      const engine = new ScriptedEngine(
+        [{ completion: PLAN_OK }, { completion: NARRATIVE }],
+        new InMemoryAuditLogger(),
+      );
+      const sandy = await createSandy({ sandyPath: cfg, transportFactory: transport, detection: pinnedDetection, engine });
+      try {
+        (engine as unknown as { audit: AuditLogger }).audit = sandy.audit;
+        const r = await sandy.ask("Summarize EMEA deals");
+
+        expect(r.plan.source).toBe("model");
+        expect(r.claims).toHaveLength(1);
+        expect(r.reportPath).toMatch(new RegExp(`\\.${format}$`));
+        // The artifact is carried in-band as base64; a binary report has no
+        // lossless string form, so reportContent is absent.
+        expect(r.reportArtifactB64).toBeTruthy();
+        expect(r.reportContent).toBeUndefined();
+        const onDisk = await fsRead(r.reportPath!);
+        expect(Buffer.from(r.reportArtifactB64!, "base64").equals(onDisk)).toBe(true);
+        const raw = onDisk.toString("latin1");
+        // The narrative re-render landed in the artifact (the narrate step
+        // rewrote it in the same binary format).
+        if (format === "pdf") {
+          expect(onDisk.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+          expect(raw).toContain("Two deals closed in EMEA"); // the narrative text
+          expect(raw).toContain("model narrative"); // the clear label
+        } else {
+          expect(onDisk.subarray(0, 2).toString("latin1")).toBe("PK");
+          expect(raw).toContain("Two deals closed in EMEA");
+          expect(raw).toContain("model narrative");
+        }
+        expect(r.narrative?.text).toBe(NARRATIVE);
+      } finally {
+        await closeAll([sandy]);
+      }
     }
   });
 
@@ -447,7 +490,12 @@ const REPLAN_STOP = JSON.stringify({ decision: "stop", reason: "the claims answe
 
 /** The multi-round fixture: `crm` exposes two tools, so a follow-up round has
  *  something new to gather. */
-async function writeMultiConfig(dir: string, allowedPaths: string[], maxPlanningRounds?: number): Promise<string> {
+async function writeMultiConfig(
+  dir: string,
+  allowedPaths: string[],
+  maxPlanningRounds?: number,
+  preferences?: Record<string, unknown>,
+): Promise<string> {
   const crm = {
     name: "crm",
     transport: "stdio",
@@ -476,7 +524,14 @@ async function writeMultiConfig(dir: string, allowedPaths: string[], maxPlanning
       audit_payload_logging: false,
       ignore_patterns: [],
     },
-    ...(maxPlanningRounds !== undefined ? { preferences: { max_planning_rounds: maxPlanningRounds } } : {}),
+    ...(preferences !== undefined || maxPlanningRounds !== undefined
+      ? {
+          preferences: {
+            ...preferences,
+            ...(maxPlanningRounds !== undefined ? { max_planning_rounds: maxPlanningRounds } : {}),
+          },
+        }
+      : {}),
   };
   await writeFile(path.join(dir, "mcp-servers.json"), JSON.stringify(manifest, null, 2));
   const cfgPath = path.join(dir, "sandy.json");
@@ -501,6 +556,9 @@ function makeLoop(sandy: Sandy, engine: ScriptedEngine, onProgress?: (e: Progres
     audit: sandy.audit,
     files: sandy.files,
     reportDir: sandy.loaded.reportOutputDir,
+    // Mirror createSandy's wiring: the loop re-renders the consolidated
+    // report in the SAME format the orchestrator wrote (issue #14).
+    reportFormat: sandy.loaded.reportFormat,
     tools: [
       { server: "crm", tool: "read_deals" },
       { server: "crm", tool: "read_contacts" },
@@ -553,6 +611,50 @@ describe("AutonomousLoop: multi-round planning (issue #19)", () => {
       expect(replanEvents.some((e) => (e.data as Record<string, unknown>)["outcome"] === "consolidated")).toBe(true);
     } finally {
       await closeAll([sandy]);
+    }
+  });
+
+  it("multi-round consolidates into ONE binary report (issue #14): both rounds' claims in the artifact", async () => {
+    for (const format of ["docx", "xlsx", "pdf"]) {
+      const ws = await tmpWorkspace();
+      const cfg = await writeMultiConfig(ws, [ws], 3, { default_report_format: format });
+      const transport = await crmServer2();
+      const engine = new ScriptedEngine(
+        [
+          { completion: PLAN_DEALS }, // parse
+          { completion: REPLAN_CONTACTS }, // replan round 1 → gather contacts
+          { completion: REPLAN_STOP }, // replan round 2 → stop
+          { completion: NARRATIVE },
+        ],
+        new InMemoryAuditLogger(),
+      );
+      const sandy = await createSandy({ sandyPath: cfg, transportFactory: transport, detection: pinnedDetection, engine });
+      try {
+        (engine as unknown as { audit: AuditLogger }).audit = sandy.audit;
+        const loop = makeLoop(sandy, engine);
+        const r = await loop.run("Summarize EMEA");
+
+        expect(r.claims).toHaveLength(2);
+        expect(r.replanning).toEqual({ rounds: 2, gatheredRounds: 1, stop: "stop" });
+        expect(r.reportPath).toMatch(new RegExp(`\\.${format}$`));
+        expect(r.reportArtifactB64).toBeTruthy();
+        const onDisk = await fsRead(r.reportPath!);
+        const raw = onDisk.toString("latin1");
+        // BOTH rounds' data is in the consolidated artifact (claims echo their
+        // args: deals + contacts), in the valid container for the format.
+        expect(raw).toContain("deals");
+        expect(raw).toContain("contacts");
+        if (format === "pdf") {
+          expect(onDisk.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+        } else {
+          expect(onDisk.subarray(0, 2).toString("latin1")).toBe("PK");
+        }
+        // The consolidated re-write is audited.
+        const replanEvents = sandy.audit.events().filter((e) => e.type === "standalone_replan");
+        expect(replanEvents.some((e) => (e.data as Record<string, unknown>)["outcome"] === "consolidated")).toBe(true);
+      } finally {
+        await closeAll([sandy]);
+      }
     }
   });
 

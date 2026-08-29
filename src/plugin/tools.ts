@@ -57,7 +57,12 @@ export const reportToolInput = z
 
 export interface ReportToolResult extends GatherToolResult {
   reportPath?: string;
+  /** The rendered report content for a TEXT format (markdown/html). */
   reportContent?: string;
+  /** The rendered report artifact as base64 bytes (issue #14): present for
+   *  every format, so a binary format (docx/xlsx/pdf) carries its on-disk
+   *  bytes in-band instead of a (non-UTF-8) string. */
+  reportArtifactB64?: string;
 }
 
 // --- sandy.write -----------------------------------------------------------

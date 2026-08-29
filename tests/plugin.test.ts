@@ -44,6 +44,7 @@ async function writeConfig(
   tools: string[] = ["read_deals"],
   writeAllowlist?: Array<{ server: string; tool: string; args?: Record<string, unknown> }>,
   policy?: Record<string, unknown>,
+  preferences?: Record<string, unknown>,
 ): Promise<string> {
   const manifest = {
     servers: [
@@ -78,6 +79,7 @@ async function writeConfig(
       ...policy,
     },
     ...(writeAllowlist !== undefined ? { write_allowlist: writeAllowlist } : {}),
+    ...(preferences !== undefined ? { preferences } : {}),
   };
   await writeFile(path.join(dir, "mcp-servers.json"), JSON.stringify(manifest, null, 2));
   const cfgPath = path.join(dir, "sandy.json");
@@ -161,6 +163,41 @@ describe("SandyPluginAPI: gather/report (PL-03)", () => {
       expect(onDisk).toContain("# EMEA");
     } finally {
       await close();
+    }
+  });
+
+  it("sandy.report renders a binary report (docx/xlsx/pdf) and returns the artifact in-band (issue #14)", async () => {
+    for (const format of ["docx", "xlsx", "pdf"]) {
+      const ws = await tmpWorkspace();
+      const cfg = await writeConfig(ws, [ws], ["read_deals"], undefined, undefined, {
+        default_report_format: format,
+      });
+      const { api, close } = await makeSession(cfg);
+      try {
+        const result = await api.report({
+          goal: "EMEA deals",
+          gather: [{ id: "deals", server: "crm", tool: "read_deals", args: { region: "emea" } }],
+          report: { title: "EMEA" },
+        });
+        expect(result.claims).toHaveLength(1);
+        // The default report name is `report-<ts>` + the format's extension,
+        // under the confined reports dir.
+        expect(result.reportPath).toMatch(new RegExp(`report-\\d+\\.${format}$`));
+        expect(result.reportPath!.startsWith(path.join(ws, "reports", "report-"))).toBe(true);
+        // The artifact is base64 in-band; a binary report has no string form.
+        expect(result.reportArtifactB64).toBeTruthy();
+        expect(result.reportContent).toBeUndefined();
+        const onDisk = await fsRead(result.reportPath!);
+        expect(Buffer.from(result.reportArtifactB64!, "base64").equals(onDisk)).toBe(true);
+        if (format === "pdf") {
+          expect(onDisk.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+        } else {
+          expect(onDisk.subarray(0, 2).toString("latin1")).toBe("PK");
+        }
+        expect(onDisk.toString("latin1")).toContain("EMEA");
+      } finally {
+        await close();
+      }
     }
   });
 

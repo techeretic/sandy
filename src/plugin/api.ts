@@ -109,6 +109,7 @@ export class SandyPluginAPI {
       progress: result.progress,
       reportPath: result.reportPath,
       reportContent: result.reportContent,
+      reportArtifactB64: result.reportArtifactB64,
     };
   }
 
@@ -244,6 +245,7 @@ export class SandyPluginAPI {
       progress: events,
       reportPath: result.reportPath,
       reportContent: result.reportContent,
+      reportArtifactB64: result.reportArtifactB64,
     };
   }
 

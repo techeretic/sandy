@@ -1,5 +1,8 @@
 import type { RenderReportInput } from "./orchestrator.js";
 import type { Claim, Gap } from "./orchestrator.js";
+import { renderDocxReport } from "./docx.js";
+import { renderPdfReport } from "./pdf.js";
+import { renderXlsxReport } from "./xlsx.js";
 
 /**
  * The report formats Sandy can render (issue #14).
@@ -9,13 +12,16 @@ import type { Claim, Gap } from "./orchestrator.js";
  * the content — every claim, gap, and provenance entry — is identical across
  * formats (SD-06); only the presentation changes.
  */
-export const REPORT_FORMATS = ["markdown", "html"] as const;
+export const REPORT_FORMATS = ["markdown", "html", "docx", "xlsx", "pdf"] as const;
 export type ReportFormat = (typeof REPORT_FORMATS)[number];
 
 /** File extension for each supported report format. */
 const REPORT_FORMAT_EXTENSION: Record<ReportFormat, string> = {
   markdown: ".md",
   html: ".html",
+  docx: ".docx",
+  xlsx: ".xlsx",
+  pdf: ".pdf",
 };
 
 /** The file extension a report should be written under, per format. */
@@ -23,14 +29,39 @@ export function reportFormatExtension(format: ReportFormat): string {
   return REPORT_FORMAT_EXTENSION[format];
 }
 
+/** Is this format a binary artifact (DOCX/XLSX/PDF), written as raw bytes? */
+export function isBinaryReportFormat(format: ReportFormat): format is "docx" | "xlsx" | "pdf" {
+  return format === "docx" || format === "xlsx" || format === "pdf";
+}
+
 /**
- * Format dispatcher (issue #14): render a report in the requested format.
+ * Format dispatcher (issue #14): render a report's on-disk artifact in the
+ * requested format.
  *
- * Markdown is the source of truth; HTML is a lightweight, deterministic
- * transform of the same (claims, gaps). The config also declares docx/xlsx/
- * pdf, which are not implemented here — they are refused fail-closed by the
- * config loader (an unimplemented format is a config error, never a silent
- * Markdown fallback).
+ * Markdown and HTML are text; DOCX, XLSX, and PDF are binary containers
+ * (DOCX/XLSX: OPC ZIP of XML parts; PDF: the PDF 1.4 page tree). Every format
+ * is a deterministic view over the same (claims, gaps) — the content is
+ * identical across formats (SD-06); only the presentation differs.
+ */
+export function renderReportArtifact(format: ReportFormat, input: RenderReportInput): Buffer {
+  switch (format) {
+    case "markdown":
+      return Buffer.from(renderMarkdownReport(input), "utf8");
+    case "html":
+      return Buffer.from(renderHtmlReport(input), "utf8");
+    case "docx":
+      return renderDocxReport(input);
+    case "xlsx":
+      return renderXlsxReport(input);
+    case "pdf":
+      return renderPdfReport(input);
+  }
+}
+
+/**
+ * Format dispatcher (issue #14) for TEXT formats: render a report in the
+ * requested format as a string (markdown/html). Binary formats are rendered
+ * with {@link renderReportArtifact}.
  */
 export function renderReport(format: ReportFormat, input: RenderReportInput): string {
   switch (format) {
@@ -39,8 +70,9 @@ export function renderReport(format: ReportFormat, input: RenderReportInput): st
     case "html":
       return renderHtmlReport(input);
     default:
-      // Exhaustiveness: the union is closed, so this is unreachable.
-      throw new Error(`unreachable report format: ${String(format)}`);
+      // Exhaustiveness: the text union is closed; binary formats go through
+      // renderReportArtifact.
+      throw new Error(`renderReport is text-only; use renderReportArtifact for "${String(format)}"`);
   }
 }
 

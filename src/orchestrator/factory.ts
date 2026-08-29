@@ -48,5 +48,13 @@ export function createOrchestrator(options: OrchestratorFactoryOptions): Orchest
       const result = await files.write(target, content, { confirmed: true });
       return result.path;
     },
+    // Binary report artifacts (docx/xlsx/pdf, issue #14) are written through
+    // the File Manager's byte-exact writeBinary (magic-validated, journaled
+    // as base64) — the same confinement and confirmation policy applies.
+    writeBinaryReport: async (bytes, file) => {
+      const target = path.join(reportDir, file);
+      const result = await files.writeBinary(target, bytes, { confirmed: true });
+      return result.path;
+    },
   });
 }
