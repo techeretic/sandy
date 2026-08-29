@@ -89,8 +89,12 @@ npm run conformance:sandbox  # Docker + Firejail sandbox matrix (identical-behav
 
 ## Documentation
 
+**Evaluating or adopting Sandy? Start with the [User Guide](guide/README.md)** — quickstart, architecture, configuration, CLI, plugin, standalone, security model, reports, and troubleshooting. A [product post](blog/sandy.md) gives the plain-English pitch.
+
 | Document | Description |
 |----------|-------------|
+| [User Guide](guide/README.md) | Consumer-facing: quickstart, architecture, configuration, CLI, plugin, standalone, security, reports, troubleshooting |
+| [Product Post](blog/sandy.md) | "The AI assistant that can't leave the sandbox" — the pitch, in plain English |
 | [PRD Final](docs/PRD_Final.md) | Merged, authoritative product requirements document |
 | [PRD Original](docs/PRD.md) | Initial product requirements document |
 | [PRD Claude](docs/PRD_Claude.md) | Claude-contributed product requirements |
