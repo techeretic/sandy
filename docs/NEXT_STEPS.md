@@ -68,7 +68,7 @@ Everything that was in the original remaining-work list (CLI, plugin, egress con
 - No network outside the declared MCP allowlist — everything goes through `NetworkGuard`.
 - TypeScript strict, ESM, Node ≥ 22. **Pin `typescript@5.9`** (7.x native compiler has a `@types/node` auto-include bug — see DIARY 2026-08-17 afternoon).
 - Run `npm run typecheck && npm test` after changes; `npm run build` for dist.
-- Update `docs/DIARY.md` per work block; keep `README.md`'s Status section current. **Doc roles (per issue #13):** DIARY = chronological history (append-only), NEXT_STEPS = forward-looking state + this roadmap, README = short headline status + links. Don't restate a milestone in more than one of them.
+- Update `docs/DIARY.md` per work block; keep `README.md`'s Status section current. **Doc roles (per issue #13):** DIARY = chronological history (append-only), NEXT_STEPS = forward-looking state + this roadmap, README = short headline status + links. Don't restate a milestone in more than one of them. **Consumer-facing docs live outside `docs/`:** `guide/` = the user guide (how to use it — 10 docs, see `guide/README.md`), `blog/` = the product pitch (marketing). Engineering rationale stays in `docs/` — keep the split.
 - Commit style: conventional-commit prefixes (`feat:`, `fix:`, `docs:`, `test:`, `perf:`, `security:`, `release:`), imperative subject; after each completed task, commit + push to the remote (per `AGENTS.md`).
 
 ## Suggested first action for the next session
