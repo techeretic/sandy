@@ -23,25 +23,29 @@ Knowledge workers inside enterprise VPNs cannot use hosted AI assistants against
 
 ## Architecture
 
-```
-User (CLI / Claude Code / Codex)
-        │
-        ▼
-┌──────────────────────────────────┐
-│           Sandy Service           │
-│  Request Parser → Orchestrator    │
-│  Task Router → MCP Client Manager │
-│  File Manager  → Sandbox Enforcer │
-└──────────────┬───────────────────┘
-               │ MCP protocol
-               ▼
-┌──────────────────────────────────┐
-│       Sandbox Boundary            │
-│  MCP Servers → Internal Services  │
-└──────────────┬───────────────────┘
-               │
-               ▼
-          Workplace VPN
+```mermaid
+flowchart TD
+    user["User (CLI / Claude Code / Codex)"]
+
+    subgraph sandy["Sandy Service"]
+        parser["Request Parser"] --> orch["Orchestrator"]
+        orch --> router["Task Router"]
+        router --> mcp["MCP Client Manager"]
+        router --> files["File Manager"]
+        enforcer["Sandbox Enforcer"]
+        mcp -.-> enforcer
+        files -.-> enforcer
+    end
+
+    subgraph boundary["Sandbox Boundary"]
+        servers["MCP Servers"] --> internal["Internal Services"]
+    end
+
+    vpn["Workplace VPN"]
+
+    user --> sandy
+    mcp -- "MCP protocol" --> servers
+    internal --> vpn
 ```
 
 ## Key Principles

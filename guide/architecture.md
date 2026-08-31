@@ -8,34 +8,34 @@ The mental model for what runs where, what the security boundary is, and how a r
 
 The reasoner is swappable and never trusted. The executor is fixed, sandboxed, and audited.
 
-```
-                       ┌───────────────────────────────────────────────┐
-                       │              The Sandbox Boundary              │
-                       │   (Docker / Firejail / WSL / gVisor / custom)  │
-   reasoner            │                                               │
-  (host LLM or         │   ┌─────────────────────────────────────────┐ │
-   local model)        │   │              SANDY                      │ │
-        │ proposes      │   │                                         │ │
-        │ a plan        │   │  Config ─▶ Sandbox Enforcer (capability │ │
-        ▼               │   │  manifest, refuses to start unsandboxed)│ │
-   ┌──────────┐  plan   │   │        │                                │ │
-   │  reasoner │ ──────▶ │   │  Orchestrator (validate plan, fan out,  │ │
-   └──────────┘          │   │  provenance, gaps, render report)       │ │
-        ▲                │   │     │           │                       │ │
-        │ narrative      │   │     ▼           ▼                       │ │
-        └────────────────│───│  MCP Client   File Manager             │ │
-                         │   │  Manager      (confined CRUD, undo)    │ │
-                         │   │     │            │                     │ │
-                         │   │     ▼            ▼                     │ │
-                         │   │  NetworkGuard  PathConfinement         │ │
-                         │   └─────┼────────────────┼──────────────────┘ │
-                         │         │                │                     │
-                         └─────────┼────────────────┼─────────────────────┘
-                                   │ declared MCP   │ working roots only
-                                   ▼ endpoints      ▼
-                            MCP servers        files & folders
-                            (→ internal        (create/edit/delete/
-                             services)         rename, undo-journaled)
+```mermaid
+flowchart TD
+    reasoner["reasoner<br/>(host LLM or local model)"]
+
+    subgraph boundary["The Sandbox Boundary (Docker / Firejail / WSL / gVisor / custom)"]
+        subgraph sandy["SANDY"]
+            config["Config"]
+            enforcer["Sandbox Enforcer<br/>(capability manifest,<br/>refuses to start unsandboxed)"]
+            orch["Orchestrator<br/>(validate plan, fan out,<br/>provenance, gaps, render report)"]
+            mcpmgr["MCP Client Manager"]
+            filemgr["File Manager<br/>(confined CRUD, undo)"]
+            netguard["NetworkGuard"]
+            pathconf["PathConfinement"]
+            config --> enforcer
+            enforcer --> orch
+            orch --> mcpmgr
+            orch --> filemgr
+            mcpmgr --> netguard
+            filemgr --> pathconf
+        end
+        mcp["MCP servers<br/>(→ internal services)"]
+        files["files & folders<br/>(create/edit/delete/rename,<br/>undo-journaled)"]
+        netguard -- "declared MCP endpoints only" --> mcp
+        pathconf -- "working roots only" --> files
+    end
+
+    reasoner -- "proposes a plan" --> orch
+    orch -- "narrative" --> reasoner
 ```
 
 ## The two modes, one core

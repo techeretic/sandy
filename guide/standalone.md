@@ -4,22 +4,20 @@ Standalone mode is Sandy with **no host LLM and no internet**: a small local mod
 
 This is the mode for **fully local, VPN-restricted, or air-gapped** environments where no frontier model can reach your internal data.
 
-```
-   your goal
-      │
-      ▼
-┌──────────────────────────────────────────────────────┐
-│  The sandbox (Docker / Firejail / …)                 │
-│                                                      │
-│   ┌────────────────────────────┐    ┌─────────────┐  │
-│   │  sandy (the executor)      │    │  local model │  │
-│   │  parse → run → narrate     │◀──▶│  (llama-     │  │
-│   │  (deterministic, audited)  │    │   server)    │  │
-│   └─────────────┬──────────────┘    └─────────────┘  │
-│                 │  declared MCP endpoints only        │
-└─────────────────┼─────────────────────────────────────┘
-                  ▼
-              internal services
+```mermaid
+flowchart TD
+    goal["your goal"]
+
+    subgraph sandbox["The sandbox (Docker / Firejail / …)"]
+        sandy["sandy (the executor)<br/>parse → run → narrate<br/>(deterministic, audited)"]
+        model["local model<br/>(llama-server)"]
+        sandy <--> model
+    end
+
+    services["internal services"]
+
+    goal --> sandy
+    sandy -- "declared MCP endpoints only" --> services
 ```
 
 The same core as plugin mode — the same Sandbox Enforcer, MCP Manager, File Manager, Orchestrator, and audit log. The only difference: who plans. Here, a 4B-class instruct model plans; Sandy still validates, confines, runs, and audits every step.

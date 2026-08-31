@@ -118,24 +118,15 @@ do not need changes to their assertions, only to the config they generate.
 In plugin mode the **host LLM** decides what to gather and writes the narrative.
 In standalone mode Sandy must do that itself, using the bundled model. The loop:
 
-```
-goal (natural language)
-   │
-   ▼
-[parse]   LlmEngine.invoke({ prompt, responseFormat: "json" })
-   │        → structured { gather tasks, report spec }
-   │        (validated against orchestratorRequestSchema — fail closed on
-   │         anything the model emits that isn't a legal request)
-   │        (bounded retry on an illegal plan; deterministic fallback on
-   │         exhaustion — see "parse robustness" below)
-   ▼
-[run]     Orchestrator.run() → claims + gaps + Markdown report   (unchanged)
-   │        (deterministic: provenance, gaps, no filler)
-   ▼
-[narrate] LlmEngine.invoke() → host-style summary text (optional; clearly
-   │        labeled; the claims/provenance remain the source of truth)
-   ▼
-report + transcript
+```mermaid
+flowchart TD
+    goal["goal (natural language)"]
+    parse["[parse] LlmEngine.invoke({ prompt, responseFormat: 'json' })<br/>→ structured { gather tasks, report spec }<br/>(validated against orchestratorRequestSchema — fail closed on<br/>anything the model emits that isn't a legal request)<br/>(bounded retry on an illegal plan; deterministic fallback on<br/>exhaustion — see 'parse robustness' below)"]
+    run["[run] Orchestrator.run() → claims + gaps + Markdown report (unchanged)<br/>(deterministic: provenance, gaps, no filler)"]
+    narrate["[narrate] LlmEngine.invoke() → host-style summary text (optional; clearly<br/>labeled; the claims/provenance remain the source of truth)"]
+    out["report + transcript"]
+
+    goal --> parse --> run --> narrate --> out
 ```
 
 Key properties:

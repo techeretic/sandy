@@ -112,50 +112,42 @@ Sandy is a sandboxable AI assistant that can operate within **any** sandbox envi
 
 ### 6. Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      USER INTERFACE                         │
-│              CLI  /  Claude Code  /  Codex                  │
-└──────────────────────────┬──────────────────────────────────┘
-                           │ natural language requests
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      SANDY SERVICE                          │
-│                                                             │
-│  ┌─────────────┐   ┌──────────────────┐   ┌──────────────┐ │
-│  │  Request     │──>│  Orchestrator    │──>│  Task        │ │
-│  │  Parser      │   │                  │   │  Router      │ │
-│  └─────────────┘   └──────────────────┘   └──────┬───────┘ │
-│                                                  │          │
-│                     ┌────────────────────────────┤          │
-│                     │                            │          │
-│             ┌───────▼──────┐            ┌────────▼──────┐  │
-│             │  MCP Client   │            │  File Manager │  │
-│             │  Manager      │            │               │  │
-│             └───────┬───────┘            └───────────────┘  │
-│                     │                                       │
-└─────────────────────┼───────────────────────────────────────┘
-                      │ MCP protocol
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    SANDBOX BOUNDARY                         │
-│                                                             │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────────┐ │
-│  │  MCP     │  │  MCP     │  │  MCP     │  │  MCP       │ │
-│  │  Server  │  │  Server  │  │  Server  │  │  Server    │ │
-│  │  (CRM)   │  │  (Jira)  │  │  (DB)    │  │  (Slack)   │ │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬───────┘ │
-│       │              │              │              │         │
-└───────┼──────────────┼──────────────┼──────────────┼─────────┘
-        │              │              │              │
-        ▼              ▼              ▼              ▼
-   ┌────────┐   ┌────────┐   ┌────────┐   ┌────────┐
-   │ CRM    │   │ Jira   │   │ Data   │   │ Slack  │
-   │ API    │   │ API    │   │ Warehouse│  │ API    │
-   └────────┘   └────────┘   └────────┘   └────────┘
-        ▲              ▲              ▲              ▲
-        └──────────────┴──────────────┴──────────────┘
-                   Workplace VPN
+```mermaid
+flowchart TD
+    ui["USER INTERFACE<br/>CLI / Claude Code / Codex"]
+
+    subgraph service["SANDY SERVICE"]
+        parser["Request Parser"] --> orch["Orchestrator"] --> router["Task Router"]
+        router --> mcpmgr["MCP Client Manager"]
+        router --> filemgr["File Manager"]
+    end
+
+    subgraph boundary["SANDBOX BOUNDARY"]
+        mcp_crm["MCP Server (CRM)"]
+        mcp_jira["MCP Server (Jira)"]
+        mcp_db["MCP Server (DB)"]
+        mcp_slack["MCP Server (Slack)"]
+    end
+
+    crm["CRM API"]
+    jira["Jira API"]
+    dw["Data Warehouse"]
+    slack["Slack API"]
+    vpn["Workplace VPN"]
+
+    ui -- "natural language requests" --> parser
+    mcpmgr -- "MCP protocol" --> mcp_crm
+    mcpmgr --> mcp_jira
+    mcpmgr --> mcp_db
+    mcpmgr --> mcp_slack
+    mcp_crm --> crm
+    mcp_jira --> jira
+    mcp_db --> dw
+    mcp_slack --> slack
+    vpn --- crm
+    vpn --- jira
+    vpn --- dw
+    vpn --- slack
 ```
 
 #### 6.1 — Components
