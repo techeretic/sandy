@@ -260,7 +260,9 @@ function formatCheckText(r: SandyCheckReport, auditFile?: string): string {
       r.mcp.failed.length ===
     0
   )
-    lines.push("    (no MCP servers)");
+    lines.push(
+      "    (none) no MCP servers configured — add them to the manifest (see config/mcp-servers.example.json); nothing to gather until then",
+    );
   lines.push(`  audit:       ${auditFile ?? "in-memory (use --audit <path> to persist)"}`);
   lines.push("");
   lines.push(`  RESULT: ${r.ok ? "OK" : "DEGRADED"}`);

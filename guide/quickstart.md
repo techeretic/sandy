@@ -49,7 +49,7 @@ Create `sandy.json` (a template is in [`config/sandy.json`](../config/sandy.json
 }
 ```
 
-And `mcp-servers.json` (a template is in [`config/mcp-servers.json`](../config/mcp-servers.json)):
+And `mcp-servers.json` — **start empty** (`{ "servers": [] }`) and add only the servers you use; a worked example is in [`config/mcp-servers.example.json`](../config/mcp-servers.example.json). The example below declares a single Jira server:
 
 ```json
 {

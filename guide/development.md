@@ -46,7 +46,7 @@ src/
 bin/sandy.js          the CLI entry point
 plugin/               plugin manifest + install.sh
 scripts/provision-model.sh   model + runtime provisioning (out-of-band)
-config/               annotated example configs
+config/               config (sandy.json example; mcp-servers.json + templates.json start empty, with *.example.json references)
 conformance/          egress + sandbox-matrix harnesses
 tests/                the Vitest suite (12 files, 323 tests)
 docs/                 engineering docs (PRD, design, decisions, diary)

@@ -114,7 +114,10 @@ export const mcpServersManifestSchema = z
   .object({
     servers: z
       .array(mcpServerSchema)
-      .min(1, { message: "at least one MCP server is required" })
+      // An empty list is legal: a fresh checkout ships with no MCP servers
+      // configured (see config/mcp-servers.json) and Sandy runs clean with
+      // zero servers — the `check` report tells you to add some. It is a
+      // reported state, not an error.
       .refine(
         (servers) =>
           new Set(servers.map((s) => s.name)).size === servers.length,

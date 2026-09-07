@@ -2,7 +2,7 @@
 
 Sandy is configured by **two files**: `sandy.json` (the main config) and the MCP server manifest it points at (`mcp-servers.json`). Both are validated **fail-closed** at startup — an invalid config is a startup error (exit code `3`), never a silent guess. Secrets are **environment references only**, never literals.
 
-A complete annotated example is in [`config/sandy.json`](../config/sandy.json) and [`config/mcp-servers.json`](../config/mcp-servers.json).
+The shipped files live in [`config/`](../config/): `sandy.json` is a complete example, while `mcp-servers.json` and `templates.json` **start empty** so a fresh checkout runs clean — the reference examples for those are [`config/mcp-servers.example.json`](../config/mcp-servers.example.json) and [`config/templates.example.json`](../config/templates.example.json). See [`config/README.md`](../config/README.md).
 
 ## `sandy.json`
 
@@ -78,7 +78,7 @@ Optional. When present, write-back is enabled and governed by an admin allowlist
 
 ## `mcp-servers.json`
 
-A manifest of the MCP servers Sandy may use. At least one server is required; names must be unique.
+A manifest of the MCP servers Sandy may use. **Zero servers is legal** — a fresh checkout ships with an empty manifest and `sandy check` reports `OK` with nothing to gather (add servers to gather data). Server names must be unique.
 
 ```json
 {
