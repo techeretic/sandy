@@ -79,13 +79,13 @@ And it's been **reviewed and hardened**: a full-repo security review closed 7 fi
 You don't need to trust us. You need a sandbox and a few minutes.
 
 ```bash
-git clone <your-sandy-repo-url> sandy && cd sandy
+git clone https://github.com/techeretic/sandy.git sandy && cd sandy
 npm ci && npm run build
 node bin/sandy.js check -c config/sandy.json     # validate + capability report
 node bin/sandy.js run <request.json> -c config/sandy.json   # gather → provenance-tracked report
 ```
 
-Point it at one internal MCP server you already have. Ask it for a small report. Open the report and follow one footnote back to the exact call that produced it. Then try to make it reach an endpoint you didn't declare — and watch it refuse, and log the refusal.
+The config ships with **no servers**, on purpose. `mcp-servers.json` starts empty, so `check` comes up clean with nothing to gather and no credentials to invent — there are no fake API keys to make it boot. Add the internal MCP server(s) you already have (secrets are environment references only, never literals) and `check` starts reporting them connected. Then ask it for a small report. Open the report and follow one footnote back to the exact call that produced it. Then try to make it reach an endpoint you didn't declare — and watch it refuse, and log the refusal.
 
 That's the whole product, in one afternoon. **An AI assistant your security team won't have to carve an exception for, and a report you can actually stand behind.**
 
