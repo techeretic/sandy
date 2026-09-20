@@ -18,6 +18,8 @@ import type {
 } from "./orchestrator/orchestrator.js";
 import { NoModelEngineError, type LoopResult } from "./standalone/loop.js";
 import { createLocalApi } from "./standalone/api.js";
+import { ImportError, runImport, type ImportResult } from "./import.js";
+import { InMemoryAuditLogger, JsonlAuditLogger } from "./audit/logger.js";
 
 export const CLI_NAME = "sandy";
 
@@ -38,7 +40,7 @@ export const EXIT = {
 } as const;
 
 interface ParsedArgs {
-  verb?: "check" | "run" | "ask" | "serve";
+  verb?: "check" | "run" | "ask" | "serve" | "import";
   /** The `run` target: a request file path or a template name (issue #15). */
   runTarget?: string;
   goal?: string;
@@ -50,6 +52,11 @@ interface ParsedArgs {
   help: boolean;
   version: boolean;
   error?: string;
+  /** `import` source: url, file, or `-` (stdin). */
+  importSource?: string;
+  importYes: boolean;
+  importApply: boolean;
+  importTools?: Record<string, string[]>;
 }
 
 function takeValue(flag: string, argv: string[], i: number): { value?: string; next?: number; error?: string } {
@@ -61,7 +68,14 @@ function takeValue(flag: string, argv: string[], i: number): { value?: string; n
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
-  const out: ParsedArgs = { json: false, progress: true, help: false, version: false };
+  const out: ParsedArgs = {
+    json: false,
+    progress: true,
+    help: false,
+    version: false,
+    importYes: false,
+    importApply: false,
+  };
   const positional: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
@@ -107,6 +121,23 @@ function parseArgs(argv: string[]): ParsedArgs {
         i = (r.next ?? i + 1) - 1;
         break;
       }
+      case "--yes":
+        out.importYes = true;
+        break;
+      case "--apply":
+        out.importApply = true;
+        break;
+      case "--tools": {
+        const r = takeValue(a, argv, i);
+        if (r.error || r.value === undefined) return { ...out, error: r.error ?? `option ${a} requires a value` };
+        try {
+          out.importTools = parseToolsFlag(r.value, out.importTools);
+        } catch (err) {
+          return { ...out, error: (err as Error).message };
+        }
+        i = (r.next ?? i + 1) - 1;
+        break;
+      }
       default:
         if (a.startsWith("-") && a !== "-") return { ...out, error: `unknown option: ${a}` };
         positional.push(a);
@@ -116,10 +147,16 @@ function parseArgs(argv: string[]): ParsedArgs {
     return { ...out, error: "missing verb (expected `check` or `run`)" };
   }
   const verb = positional[0];
-  if (verb !== "check" && verb !== "run" && verb !== "ask" && verb !== "serve") {
+  if (
+    verb !== "check" &&
+    verb !== "run" &&
+    verb !== "ask" &&
+    verb !== "serve" &&
+    verb !== "import"
+  ) {
     return {
       ...out,
-      error: `unknown verb: ${verb} (expected '${CLI_NAME} check', '${CLI_NAME} run', '${CLI_NAME} ask', or '${CLI_NAME} serve')`,
+      error: `unknown verb: ${verb} (expected '${CLI_NAME} check', '${CLI_NAME} run', '${CLI_NAME} ask', '${CLI_NAME} serve', or '${CLI_NAME} import')`,
     };
   }
   out.verb = verb;
@@ -137,6 +174,10 @@ function parseArgs(argv: string[]): ParsedArgs {
       // The goal is natural language — join any remaining words (quoting varies
       // across shells, so unquoted multi-word goals work too).
       out.goal = positional.slice(1).join(" ");
+    } else if (verb === "import") {
+      // The source is a URL, a file, or `-` (stdin).
+      out.importSource = positional[1];
+      if (positional.length > 2) return { ...out, error: `unexpected argument: ${positional[2]}` };
     } else {
       return { ...out, error: `unexpected argument: ${positional[1]}` };
     }
@@ -146,6 +187,34 @@ function parseArgs(argv: string[]): ParsedArgs {
   }
   if (verb === "ask" && !out.goal) {
     return { ...out, error: "`ask` requires a goal: sandy ask \"<goal>\"" };
+  }
+  if (verb === "import" && !out.importSource) {
+    return { ...out, error: "`import` requires a source: sandy import <url|file|->" };
+  }
+  return out;
+}
+
+/**
+ * Parse a `--tools` value: `server=a,b` or `server=a,b;server2=c,d`
+ * (repeatable; later entries for the same server replace earlier ones).
+ */
+function parseToolsFlag(
+  value: string,
+  existing: Record<string, string[]> | undefined,
+): Record<string, string[]> {
+  const out: Record<string, string[]> = { ...(existing ?? {}) };
+  for (const pair of value.split(";")) {
+    if (!pair.trim()) continue;
+    const eq = pair.indexOf("=");
+    if (eq <= 0) throw new Error(`--tools expects server=tool1,tool2 (got "${pair.trim()}")`);
+    const server = pair.slice(0, eq).trim();
+    const tools = pair
+      .slice(eq + 1)
+      .split(",")
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0);
+    if (!/^[a-z][a-z0-9-]*$/.test(server)) throw new Error(`--tools: invalid server name "${server}"`);
+    out[server] = tools;
   }
   return out;
 }
@@ -158,6 +227,12 @@ usage:
   ${CLI_NAME} run <request.json|template> [options] run a request file or a saved template (issue #15)
   ${CLI_NAME} ask "<goal>" [options]       ask the bundled model to plan + run + narrate (standalone)
   ${CLI_NAME} serve [options]              run the standalone service (loopback API + ready model)
+  ${CLI_NAME} import <url|file|-> [options] validate + stage an MCP server manifest (default: staged, review first)
+
+import options:
+      --yes              skip the one-shot fetch confirmation prompt
+      --apply            promote the staged entry into live config (default: staged only)
+      --tools <s=a,b[;s2=c,d]>  set a server's allowed_tools (each tool must be in its capabilities)
 
 options:
   -c, --config <path>    path to sandy.json (default: $SANDY_CONFIG or ./sandy.json)
@@ -479,6 +554,30 @@ async function runServe(args: ParsedArgs, overrides: Partial<SandyDeps> = {}): P
   return EXIT.ok;
 }
 
+function formatImportText(r: ImportResult, auditFile?: string): string {
+  const lines: string[] = [];
+  lines.push("Sandy import");
+  lines.push(`  source:  ${r.source}`);
+  lines.push(`  sha256:  ${r.hash}`);
+  lines.push(`  staged:  ${r.staged}`);
+  lines.push(`  servers:`);
+  for (const s of r.review.servers) {
+    lines.push(`    • ${s.name} (${s.transport}) — allows ${s.allowedTools.join(", ")} of ${s.exposedCount} exposed`);
+  }
+  if (r.review.networkLines.length > 0) {
+    lines.push(`  add to sandbox.allowed_network:`);
+    for (const line of r.review.networkLines) lines.push(`    "sandbox": { "allowed_network": [ ..., "${line}" ] }`);
+  }
+  if (r.review.envNames.length > 0) {
+    lines.push(`  export env vars (names only, values never staged):`);
+    for (const name of r.review.envNames) lines.push(`    export ${name}="..."`);
+  }
+  lines.push(`  allowlist: confirm the tools above, or re-run with --tools <server=a,b>`);
+  lines.push(`  applied: ${r.applied ? "yes (live config updated + re-validated)" : "no — review the staged file, then re-run with --apply (or edit config yourself)"}`);
+  lines.push(`  audit:   ${auditFile ?? "in-memory (use --audit <path> to persist)"}`);
+  return lines.join("\n");
+}
+
 function translateError(err: unknown): RunError {
   if (err instanceof UsageError) return new RunError(EXIT.usage, err.message);
   // `ask` against a host engine is a mode mismatch, not a crash: a reported
@@ -486,6 +585,7 @@ function translateError(err: unknown): RunError {
   if (err instanceof NoModelEngineError) return new RunError(EXIT.usage, err.message);
   if (err instanceof ConfigError) return new RunError(EXIT.config, err.message);
   if (err instanceof SandboxViolationError) return new RunError(EXIT.sandbox, err.message);
+  if (err instanceof ImportError) return new RunError(err.code, err.message);
   return new RunError(EXIT.error, err instanceof Error ? (err.stack ?? err.message) : String(err));
 }
 
@@ -514,6 +614,37 @@ export async function runCli(argv: string[], overrides: Partial<SandyDeps> = {})
       const report = await withSandy(args, (s) => s.check(), overrides);
       if (args.json) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
       else process.stdout.write(formatCheckText(report, args.auditFile) + "\n");
+      return EXIT.ok;
+    }
+    if (args.verb === "import") {
+      // Import is config-free at the staging level: it never composes Sandy
+      // (no sandbox, no MCP fleet). --apply loads + re-validates the config
+      // itself. The audit log records the one-shot dial + the stage/apply
+      // decision (import_fetch / import_staged).
+      const source = args.importSource!;
+      const importSource =
+        /^https?:\/\//i.test(source)
+          ? { url: source }
+          : source === "-"
+            ? { stdin: true }
+            : { file: source };
+      const audit = args.auditFile
+        ? new JsonlAuditLogger(args.auditFile)
+        : new InMemoryAuditLogger();
+      let result: ImportResult;
+      try {
+        result = await runImport(importSource, {
+          configPath: resolveConfigPath(args.configPath),
+          audit,
+          yes: args.importYes,
+          apply: args.importApply,
+          tools: args.importTools,
+        });
+      } finally {
+        await audit.close();
+      }
+      if (args.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      else process.stdout.write(formatImportText(result, args.auditFile) + "\n");
       return EXIT.ok;
     }
     if (args.verb === "serve") {
