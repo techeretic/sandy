@@ -28,7 +28,7 @@ Both share the same core: the same sandbox enforcer, the same MCP manager, the s
 | [Quickstart](quickstart.md) | You want a first successful run in a few minutes |
 | [Architecture](architecture.md) | You want the mental model: what runs where, what the security boundary is |
 | [Configuration](configuration.md) | You're writing or reviewing `sandy.json` / `mcp-servers.json` |
-| [CLI reference](cli.md) | You drive Sandy from the terminal (`check` / `run` / `ask` / `serve`) |
+| [CLI reference](cli.md) | You drive Sandy from the terminal (`check` / `run` / `ask` / `serve` / `import`) |
 | [Plugin guide](plugin.md) | You integrate Sandy into Claude Code / Codex via the `sandy.*` MCP tools |
 | [Standalone mode](standalone.md) | You run the bundled local model and the loopback `sandy serve` REST API |
 | [Security model](security.md) | You're the operator, security, or compliance owner who needs to prove the guarantees |

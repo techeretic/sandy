@@ -28,10 +28,12 @@ For contributors and anyone building on top of the codebase.
 
 ```
 src/
-  cli.ts              CLI (check / run / ask / serve) + stable exit codes
+  cli.ts              CLI (check / run / ask / serve / import) + stable exit codes
   index.ts            public exports (everything is exported from here)
   sandy.ts            createSandy(deps) — the composition factory
   engine.ts           the LLM-engine seam + the four backends
+  import.ts           `sandy import` pipeline: fetch (one-shot confirmed dial) →
+                      validate (the manifest schema) → stage (hash-pinned) → apply
   memory-bound.ts     opt-in in-service cgroup memory bound (issue #18)
   config/             sandy.json + mcp-servers.json schemas, fail-closed loader
   sandbox/            enforcer, runtime detection, capability manifest,
@@ -48,7 +50,7 @@ plugin/               plugin manifest + install.sh
 scripts/provision-model.sh   model + runtime provisioning (out-of-band)
 config/               annotated example configs
 conformance/          egress + sandbox-matrix harnesses
-tests/                the Vitest suite (12 files, 323 tests)
+tests/                the Vitest suite (13 files, 346 tests)
 docs/                 engineering docs (PRD, design, decisions, diary)
 guide/                this consumer-facing guide
 ```

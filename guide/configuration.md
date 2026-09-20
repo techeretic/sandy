@@ -37,7 +37,7 @@ A complete annotated example is in [`config/sandy.json`](../config/sandy.json) a
 |-------|------|----------|-------------|
 | `runtime` | enum | yes | The boundary you're running in: `docker`, `firejail`, `wsl`, `gvisor`, `k8s-pod`, `systemd-nspawn`, `chroot`, `macos-sandbox-exec`, `windows-appcontainer`, or `custom`. |
 | `allowed_paths` | absolute path[] | yes (≥1) | Your **working roots** — the only files Sandy may touch. Must be absolute, no `..`. |
-| `allowed_network` | `host:port`[] | no (default `[]`) | The **only** network endpoints Sandy may reach. Default empty = no egress at all. |
+| `allowed_network` | `host:port`[] | no (default `[]`) | The **only** network endpoints Sandy may reach at runtime. Default empty = no egress at all. (The `sandy import` one-shot fetch is the sole audited exception — see [the import flow](#the-import-flow-sandy-import).) |
 | `max_memory_mb` | int > 0 | yes | Memory budget (bytes to the cgroup ceiling / in-service bound). |
 | `max_cpu_percent` | int 1–100 | yes | CPU budget. Mapped to the local model's `--threads` (100 = no limit). |
 | `enforce_memory_limit` | bool | no (default `false`) | Opt-in in-service hard memory bound on the bundled model (cgroup v2). Fails closed where there's no cgroup delegation. See [Standalone mode](standalone.md). |
@@ -139,3 +139,7 @@ Every part of config loading refuses rather than guesses:
 - A write-allowlist entry wider than the read allowlist → `ConfigError`.
 - A `default_report_format` the renderer can't produce → `ConfigError` (never a silent fallback to Markdown).
 - A declared `allowed_network` endpoint that the detected boundary can't reach → reported as **reduced mode** (the capability manifest says what was lost), not a crash.
+
+## The import flow (`sandy import`)
+
+`mcp-servers.json` entries can also be **imported** instead of hand-written: [`sandy import <url|file|->`](cli.md#import-an-mcp-server-stage-review-apply) fetches (a one-shot, human-confirmed, audited dial — see [Security model → The import dial](security.md#threat-model-notes)) or reads a machine-readable manifest, validates it against **the exact schema above**, and stages it under `.sandy-import/<sha256>.json` with a review package (the entry, the `allowed_network` line(s) to add, the env-var names to export, and the per-server allowlist). Nothing touches live config until `--apply`, which re-runs the full fail-closed load as its final gate. The import is **deterministic-only in v1**: prose URLs are rejected; the `allowed_tools` read allowlist is never auto-expanded (confirm it or pass `--tools`). Design: [`docs/IMPORT_DESIGN.md`](../docs/IMPORT_DESIGN.md).

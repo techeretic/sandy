@@ -10,7 +10,7 @@ The one-line summary: **Sandy is an untrusted-reasoner / fixed-executor system.*
 |---|-----------|--------------|
 | 1 | **Refuses to run unsandboxed** | The enforcer detects the boundary at startup and throws if none is found (exit `4`), unless the operator explicitly declared a `custom` boundary they manage. |
 | 2 | **Fails closed on a runtime mismatch** | The config is approved for one boundary; a declared/detected mismatch is a startup refusal (a Kubernetes pod is accepted for a `docker` declaration). |
-| 3 | **Zero egress outside declared endpoints** | There is no general HTTP client. Every network dial goes through the **NetworkGuard**, which allows only `http(s)` to a `host:port` in `sandbox.allowed_network`. |
+| 3 | **Zero egress outside declared endpoints** | There is no general HTTP client. Every network dial goes through the **NetworkGuard**, which allows only `http(s)` to a `host:port` in `sandbox.allowed_network` — with one bounded exception: the `sandy import` one-shot fetch (the confirmed, audited import dial; see [Threat model notes → The import dial](#threat-model-notes)). |
 | 4 | **Filesystem confined to working roots** | All file work goes through **PathConfinement**, which resolves **real paths** and refuses symlink escapes outside the declared roots. |
 | 5 | **Least-privilege tool access** | Per-server `allowed_tools` (the **read allowlist**) is applied *before* a tool is wired, and a request's `server`/`tool` pairs are re-validated against the **legal tool catalog**. The allowlist is enforced twice. |
 | 6 | **Read-only by default** | With no `write_allowlist`, the default `ReadOnlyGate` refuses every write. |
@@ -82,6 +82,8 @@ Event types:
 | `session_start` / `session_end` | The session lifecycle. |
 | `standalone_parse` / `standalone_plan` / `standalone_narrate` / `standalone_replan` | The autonomous loop's decisions (plan source, attempts, narrative, re-plan outcome). |
 | `template_run` | A run resolved from a saved template. |
+| `import_fetch` | An `sandy import` fetch — the URL, the content hash, and the byte count (the one-shot dial). |
+| `import_staged` | An `sandy import` staging/apply — the staged path, the hash, the servers, and whether `--apply` promoted it. |
 
 **Args are logged by hash by default** (AU-02) — `policy.audit_payload_logging: true` opts into logging full payloads (retrieved data, model prompt/completion). The log is the forensic record: it is what answers "what did it call, with what, when, and what did it change?" The `GET /audit` endpoint and `GET /jobs/:id` expose the **transcript** export.
 
@@ -98,6 +100,16 @@ Event types:
 The re-plan step has the same analysis with a strictly bounded blast radius: the decision is only `stop` or a set of gather tasks that pass the same gate as round 1, so the worst case is a few extra *legal* MCP calls within the round cap — never an unvalidated request, never a write. **Accepted residual risk:** a weak local model *could* be steered by injected content into a misleading narrative, even though the underlying claims remain correct and traceable. See [`docs/PHASE2_DESIGN.md`](../docs/PHASE2_DESIGN.md) §2.1 for the full note.
 
 **Ingress (the service).** `sandy serve` is loopback-only by construction: an off-loopback bind is refused fail-closed, non-JSON content types are rejected (`415`), and a foreign `Origin` is rejected (`403`) — independent of CORS. There is no auth in the v1 service because it is loopback-only and single-user; a later need is a config-gated addition, not a default.
+
+**The import dial (`sandy import`).** `sandy import <url>` is the one deliberate, bounded exception to the zero-egress rule: it fetches an MCP server manifest from a URL the operator gives it. It is engineered so the exception stays narrow — see [Configuration guide → the import flow](configuration.md#the-import-flow-sandy-import) for the mechanics and [CLI reference → import](cli.md#import-an-mcp-server-stage-review-apply) for the command surface:
+
+- **One-shot, human-confirmed, audited.** The operator sees the exact `GET <url>` and confirms (default: no). The dial and its content hash land in the audit log (`import_fetch`); a cancelled or refused fetch dials nothing.
+- **Bounded.** A timeout, a body-size cap, and a redirect cap apply to the fetch. Non-http(s) schemes are refused.
+- **The fetch is not the trust.** The fetched bytes pass through the same fail-closed manifest validation as any hand-written `mcp-servers.json` — nothing is legal because a URL said so. Staging never touches live config (the entry is content-hash-pinned under `.sandy-import/`); only an explicit `--apply` promotes it, and it re-runs the full config load as the final gate.
+- **It never widens the sandbox silently.** The imported server's endpoint still has to be added to `sandbox.allowed_network` (the review package prints the exact line) and reviewed like any other config change.
+- **No air-gap risk.** The file/stdin path (`sandy import <file|->`) needs no network at all, so an air-gapped box can import from a manifest fetched elsewhere.
+
+**Accepted residual risk:** the operator pointed Sandy at a URL whose manifest was valid at fetch time — a later change to that URL is a *different* content hash, so it produces a fresh staged entry, never a silent mutation. The trust decision is "the operator confirmed this dial, reviewed this hash, and applied this diff."
 
 ## Proving it: conformance
 
