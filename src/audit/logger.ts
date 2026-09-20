@@ -30,7 +30,12 @@ export type AuditEventType =
   // Multi-round planning (issue #19): the loop's replan decisions.
   | "standalone_replan"
   // Recurring templates (issue #15): a run job resolved from a saved request.
-  | "template_run";
+  | "template_run"
+  // `sandy import` (docs/IMPORT_DESIGN.md): the one-shot import dial (the only
+  // permitted egress exception — recorded with the content hash so the dial
+  // and its bytes are auditable) and the staged/apply decision.
+  | "import_fetch"
+  | "import_staged";
 
 export interface AuditEvent {
   /** Monotonic sequence number within the session (1-based). */

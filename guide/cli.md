@@ -16,6 +16,7 @@ sandy <verb> [options]
 | `run <request.json\|template>` | Run a request file **or** a saved template. |
 | `ask "<goal>"` | (Standalone) Ask the bundled model to plan, run, report, and narrate. |
 | `serve` | (Standalone) Run the long-lived, loopback-only REST + SSE service. |
+| `import <url\|file\|->` | Validate + stage an MCP server manifest. **Staged by default** — nothing touches live config until you review and `--apply`. |
 
 `run` target resolution (fail-closed): a path that **exists as a file** is always the request file. Otherwise the name is tried against the configured template registry — and only an exact match runs as a template. An unknown name that is neither a file nor a template is a **usage error**, never a silent guess.
 
@@ -28,8 +29,13 @@ sandy <verb> [options]
 | `--port <n>` | (serve) Loopback port. `0` = pick a free one (default). |
 | `--json` | Print machine-readable JSON on stdout. |
 | `--no-progress` | Disable streaming progress on stderr. |
+| `--yes` | (import) Skip the one-shot fetch confirmation prompt. |
+| `--apply` | (import) Promote the staged entry into live config. Default is **staged only**. |
+| `--tools <s=a,b\[,;s2=c,d]>` | (import) Set a server's `allowed_tools`; each tool must be in that server's `capabilities`. Repeatable. |
 | `-h, --help` | Show help. |
 | `-V, --version` | Show the version. |
+
+`import` (docs: [IMPORT_DESIGN](../docs/IMPORT_DESIGN.md)) takes a **URL**, a **file**, or `-` (stdin). It fetches (a one-shot, human-confirmed, audited egress dial — the only permitted exception to the zero-egress invariant), validates the content against the **same** fail-closed manifest schema as `mcp-servers.json`, and writes a **content-hash-pinned** staged entry under `.sandy-import/`. It then prints a review package: the entry, the exact `sandbox.allowed_network` lines to add, the env-var names to export (never values), and the per-server allowlist. The read allowlist is **never auto-expanded** — it stays exactly what the manifest declared unless you pass `--tools`. Only `--apply` (or editing the config yourself) promotes a staged entry; `--apply` re-runs the full config load as the final gate and refuses to overwrite existing server names. v1 is **deterministic-only**: the source must be a machine-readable manifest. Transcribing prose pages (`--auto`) is a documented follow-up — the core carries no LLM client in v1.
 
 ## Exit codes (stable contract for CI/callers)
 
@@ -37,7 +43,7 @@ sandy <verb> [options]
 |------|---------|
 | `0` | OK. A *degraded* state is **reported**, not fatal. |
 | `1` | Unexpected error. |
-| `2` | Usage error (unknown verb/flag, invalid request file, unknown template). |
+| `2` | Usage error (unknown verb/flag, invalid request file, unknown template, invalid import source, cancelled import fetch). |
 | `3` | Config error (fail-closed: invalid config, missing env, egress cross-check). |
 | `4` | Sandbox violation (unsandboxed, or declared/detected runtime mismatch). |
 
@@ -78,6 +84,29 @@ node bin/sandy.js serve -c sandy.json --port 0          # picks a free loopback 
 ```
 
 See [Standalone mode → REST API](standalone.md#the-rest-api) for the endpoints.
+
+### Import an MCP server (stage, review, apply)
+
+```bash
+# Stage from a URL (one-shot confirmed fetch) — nothing touches live config:
+node bin/sandy.js import https://registry.internal/servers/jira.json
+# → staged: .sandy-import/<sha256>.json  (review the printed package)
+
+# Same, from a file or stdin (air-gap: fetch elsewhere, import here):
+node bin/sandy.js import ./jira.json
+curl -s https://registry.internal/servers/jira.json | node bin/sandy.js import -
+
+# Tighten the read allowlist, then promote into live config:
+node bin/sandy.js import https://registry.internal/servers/jira.json \
+  --tools jira=read_sprints,read_issues --apply
+# → appends the server to mcp-servers.json, adds sandbox.allowed_network
+#   entries, and re-runs the full config load as the final gate.
+```
+
+Exit codes follow the stable contract: usage-class errors (bad source, cancelled
+fetch) exit `2`; fail-closed validation/config errors exit `3`. The fetch and the
+stage/apply decision are recorded in the audit log (`import_fetch`,
+`import_staged`) when `-o, --audit <path>` is given.
 
 ## Reading the output
 

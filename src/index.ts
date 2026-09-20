@@ -229,6 +229,21 @@ export {
 } from "./standalone/api.js";
 export { CLI_NAME, EXIT, runCli } from "./cli.js";
 export {
+  DEFAULT_STAGE_DIR,
+  IMPORT_DEFAULTS,
+  ImportError,
+  confirmFetch,
+  fetchImportManifest,
+  parseAndValidateManifest,
+  runImport,
+  type ImportFetchOptions,
+  type ImportFetchResult,
+  type ImportOptions,
+  type ImportResult,
+  type ImportSource,
+  type StagedImport,
+} from "./import.js";
+export {
   SandyPluginAPI,
   ToolInputError,
 } from "./plugin/api.js";

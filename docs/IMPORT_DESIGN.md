@@ -1,7 +1,17 @@
 # Design: `sandy import` — URL-driven MCP server configuration
 
-**Status:** Design (brainstormed, agreed in outline)
+**Status:** v1 implemented (deterministic pipeline: fetch → validate → stage → `--apply`)
 **Date:** 2026-09-20
+
+> **v1 scope note:** the `--auto` LLM-transcription path (and `--auto-model`) is
+> **deferred** — the core has no LLM client in v1 (plugin mode reasons in the
+> host; the standalone model engine lives inside the sandbox loop). Prose URLs
+> are rejected fail-closed with a pointer to this note. Everything else in this
+> design — the one-shot confirmed/audited fetch, the shared validation gate,
+> content-hash-pinned staging, the review package, `--apply` with the final
+> re-validation gate, collision refusal, and the audit events — is implemented
+> in `src/import.ts` (CLI: `sandy import <url|file|->`). See
+> `docs/PLAN_IMPORT.md` for the v1 implementation plan.
 
 ## Problem
 
