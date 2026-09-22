@@ -8,8 +8,8 @@ How to diagnose a problem, read the signals, and fix the common failures. The tw
 |------|---------|------------|
 | `0` | OK. A *degraded* state is **reported, not fatal** — read the `check` output for the `−` loss lines. | Nothing; the run is valid, just reduced. |
 | `1` | Unexpected error. | Read the stderr message; file a bug if it's a Sandy defect. |
-| `2` | Usage error — unknown verb/flag, invalid request file, unknown template name. | Fix the command. A `run` name that is neither a file nor a registered template is a usage error, never a silent guess. |
-| `3` | **Config error** (fail-closed). | Fix `sandy.json` / `mcp-servers.json` — see [Common failures](#common-failures). |
+| `2` | Usage error — unknown verb/flag, invalid request file, unknown template name, an invalid `import` source, or a cancelled `import` fetch. | Fix the command. A `run` name that is neither a file nor a registered template is a usage error, never a silent guess. |
+| `3` | **Config error** (fail-closed) — including an `import` whose manifest fails validation or whose `--apply` cannot merge into a loadable config. | Fix `sandy.json` / `mcp-servers.json` (or the imported manifest) — see [Common failures](#common-failures). |
 | `4` | **Sandbox violation** — unsandboxed, or a declared/detected runtime mismatch. | Run inside the declared boundary; see below. |
 
 A non-zero code from `check` is a *config/startup* problem, not a run failure — read the message.
@@ -60,9 +60,18 @@ The config is invalid. The message names the field. Typical causes:
 - **sse/http:** the URL is reachable *from inside the sandbox* and is in `sandbox.allowed_network` (a non-declared endpoint fails closed at startup, exit 3 — VPN-02).
 - **auth:** `bearer`/`api_key` need a valid token (env-ref). `oauth` and `mtls` **fail closed** (not yet implemented) — an unauthenticated connect is refused.
 
+### `sandy import`
+
+- **"not valid JSON … deterministic-only" (exit 3)** — the source was prose, not a machine-readable manifest. v1 import validates native-schema JSON only; transcribing prose pages (`--auto`) is a documented follow-up. Fetch the raw manifest JSON instead.
+- **"will dial … GET … / import cancelled" (exit 2)** — the one-shot fetch was not confirmed (default is no). Re-run and answer `y`, or pass `--yes`.
+- **fetch failed: timeout / size / too many redirects (exit 2)** — the dial is bounded (30s, 1MB, 3 redirects). The endpoint is slow or the body is too large for the import channel; fetch it out-of-band and `sandy import <file>`.
+- **`--apply` → "cannot apply" (exit 3)** — the live config (`-c`/`$SANDY_CONFIG`) doesn't load: fix it first (`sandy check`). Applying into a broken config is refused, not repaired.
+- **`--apply` → "already exists" (exit 3)** — a server with that name is already in the manifest. Import never overwrites; import under a new name or edit the existing entry.
+- **"applied config does not validate" (exit 3)** — the merge re-ran the full config load and it failed (e.g. a required env var is unset). The live files were written; fix the named issue — the staged `.sandy-import/<hash>.json` entry is still there and the audit log has the record.
+
 ### `egress blocked (…): <url> is not in the declared allowlist`
 
-A network dial targeted an endpoint outside `sandbox.allowed_network`. Add the endpoint (and ensure the boundary actually permits it), or remove the call. This is the guard working as intended.
+A network dial targeted an endpoint outside `sandbox.allowed_network`. Add the endpoint (and ensure the boundary actually permits it), or remove the call. This is the guard working as intended. (The `sandy import` fetch is the one audited exception to this rule — a dial it makes is an `import_fetch` event, not an `egress_blocked` one.)
 
 ### A report is written with gaps instead of data
 

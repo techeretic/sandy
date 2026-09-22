@@ -65,6 +65,7 @@ flowchart TD
 node bin/sandy.js check  --config config/sandy.json     # validate config + capability/health report
 node bin/sandy.js run <request.json> --config config/sandy.json   # gather → provenance-tracked report
 node bin/sandy.js run <template> --config config/sandy.json       # re-run a saved request (templates.json)
+node bin/sandy.js import <url|file|-> --config config/sandy.json  # validate + stage an MCP server manifest (--apply to promote)
 # add --json for machine-readable output, --audit <path> to persist the JSONL log
 ```
 
