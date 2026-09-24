@@ -100,6 +100,7 @@ npm run conformance:sandbox  # Docker + Firejail sandbox matrix (identical-behav
 |----------|-------------|
 | [User Guide](guide/README.md) | Consumer-facing: quickstart, architecture, configuration, CLI, plugin, standalone, security, reports, troubleshooting |
 | [Product Post](blog/sandy.md) | "The AI assistant that can't leave the sandbox" — the pitch, in plain English |
+| [Field Test: Library of Congress](blog/library-of-congress.md) | Exploratory v0.2.1 walkthrough — `sandy import`, a macOS Seatbelt boundary, templates, and the rough edges found along the way |
 | [PRD Final](docs/PRD_Final.md) | Merged, authoritative product requirements document |
 | [PRD Original](docs/PRD.md) | Initial product requirements document |
 | [PRD Claude](docs/PRD_Claude.md) | Claude-contributed product requirements |
