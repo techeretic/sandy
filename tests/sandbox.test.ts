@@ -300,6 +300,19 @@ describe("SandboxEnforcer", () => {
     expect(enforcer.detection.runtime).toBe("none");
   });
 
+  it("reports a custom boundary as unverified, not as refusing to continue", async () => {
+    const enforcer = await SandboxEnforcer.create(
+      sandboxConfig({ runtime: "custom" }),
+      mcpManifest,
+      { detection: detect("none") },
+    );
+    expect(enforcer.manifest.declaredRuntime).toBe("custom");
+    const runtimeLoss = enforcer.report.lost.find((l) => l.area === "runtime");
+    expect(runtimeLoss?.detail).toMatch(/continuing under the declared "custom" boundary.*cannot verify it/);
+    expect(runtimeLoss?.detail).not.toMatch(/refusing/);
+    expect(enforcer.degraded).toBe(true); // still reported, never hidden
+  });
+
   it("fails closed on a declared/detected runtime mismatch", async () => {
     const err = await SandboxEnforcer.create(sandboxConfig({ runtime: "firejail" }), mcpManifest, {
       detection: detect("docker"),
