@@ -16,7 +16,10 @@ export interface SubprocessNeed {
  */
 export interface CapabilityManifest {
   schema: "sandy.capability-manifest/v1";
+  /** The detected runtime (`none` when no detector matched). */
   runtime: string;
+  /** The runtime the config declares (`custom` = an operator-managed boundary). */
+  declaredRuntime?: string;
   /** Filesystem roots the enforcer will confine to. */
   filesystemRoots: string[];
   /** Network endpoints allowed for egress (all flow via MCP). */
@@ -54,6 +57,7 @@ export function buildCapabilityManifest(
   return {
     schema: "sandy.capability-manifest/v1",
     runtime: detection.runtime,
+    declaredRuntime: sandbox.runtime,
     filesystemRoots: sandbox.allowed_paths,
     networkEndpoints: sandbox.allowed_network,
     subprocesses,
@@ -80,9 +84,15 @@ export function probeCapabilities(manifest: CapabilityManifest, options: ProbeOp
   const lost: CapabilityLoss[] = [];
 
   if (manifest.runtime === "none") {
+    // Only a `custom` declaration gets past the enforcer with no detected
+    // runtime, so say what is true there: Sandy is running, and the boundary
+    // is the operator's — trusted, not verified.
     lost.push({
       area: "runtime",
-      detail: "no sandbox runtime detected; running unsandboxed is a policy violation — refusing to continue without a boundary",
+      detail:
+        manifest.declaredRuntime === "custom"
+          ? 'no sandbox runtime detected; continuing under the declared "custom" boundary, which the operator manages — Sandy cannot verify it'
+          : "no sandbox runtime detected; running unsandboxed is a policy violation — refusing to continue without a boundary",
     });
   }
 
