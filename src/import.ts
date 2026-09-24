@@ -5,6 +5,12 @@ import process from "node:process";
 import { InMemoryAuditLogger, JsonlAuditLogger, type AuditLogger } from "./audit/logger.js";
 import { loadSandyConfig, type LoadedConfig } from "./config/loader.js";
 import { mcpServersManifestSchema, sandyConfigSchema, type McpServersManifest } from "./config/schema.js";
+import {
+  convertRegistryServerJson,
+  isRegistryServerJson,
+  RegistryConversionError,
+  type RegistrySource,
+} from "./import-registry.js";
 
 /**
  * `sandy import` (docs/IMPORT_DESIGN.md) — URL- and file-driven MCP server
@@ -17,7 +23,9 @@ import { mcpServersManifestSchema, sandyConfigSchema, type McpServersManifest } 
  * re-runs the full config load as the final gate.
  *
  * v1 is the deterministic path only: the source must be a machine-readable
- * manifest in the native schema. Transcribing prose pages with an LLM
+ * manifest — the native schema, or an MCP Registry `server.json`, which is
+ * converted deterministically (`import-registry.ts`) and then validated by
+ * the same schema. Transcribing prose pages with an LLM
  * (`--auto`) is a documented follow-up — the core has no LLM client in v1.
  */
 
@@ -85,6 +93,8 @@ export interface StagedImport {
 }
 
 export interface ImportResult {
+  /** The source format: the native manifest, or a converted MCP Registry `server.json`. */
+  format: "native" | "mcp-registry";
   staged: string;
   hash: string;
   source: string;
@@ -113,6 +123,11 @@ export interface ImportOptions {
   apply?: boolean;
   /** `server` → explicit `allowed_tools`; each tool must be in that server's `capabilities`. */
   tools?: Record<string, string[]>;
+  /**
+   * For an MCP Registry `server.json` offering both: use its hosted remote or
+   * its local package. Required only when both exist (an operator decision).
+   */
+  registrySource?: RegistrySource;
   /** Test seam: the dial (default: bounded fetch with redirect cap). */
   fetcher?: (url: string, opts: ImportFetchOptions) => Promise<ImportFetchResult>;
   /** Test seam: the confirmation prompt (default: read one line from stdin). */
@@ -270,6 +285,7 @@ async function readAllStdin(): Promise<string> {
 export function parseAndValidateManifest(
   text: string,
   origin: string,
+  registry: { tools?: Record<string, string[]>; source?: RegistrySource } = {},
 ): McpServersManifest {
   let json: unknown;
   try {
@@ -280,6 +296,16 @@ export function parseAndValidateManifest(
       `content from ${origin} is not valid JSON: ${(err as Error).message}. ` +
         "v1 import is deterministic-only (machine-readable manifests); transcribing prose pages (--auto) is not implemented yet.",
     );
+  }
+  if (isRegistryServerJson(json)) {
+    try {
+      json = convertRegistryServerJson(json, registry.tools, registry.source);
+    } catch (err) {
+      if (err instanceof RegistryConversionError) {
+        throw new ImportError(3, `cannot convert MCP Registry server.json from ${origin}: ${err.message}`);
+      }
+      throw err;
+    }
   }
   const result = mcpServersManifestSchema.safeParse(json);
   if (!result.success) {
@@ -517,6 +543,14 @@ async function applyStaged(staged: StagedImport, opts: ImportOptions): Promise<v
   }
 }
 
+function isRegistrySource(text: string): boolean {
+  try {
+    return isRegistryServerJson(JSON.parse(text));
+  } catch {
+    return false;
+  }
+}
+
 // --- Entry point ----------------------------------------------------------------
 
 /**
@@ -558,7 +592,8 @@ export async function runImport(source: ImportSource, opts: ImportOptions = {}):
     throw new ImportError(2, "no import source given (url, file, or - for stdin)");
   }
 
-  const validated = parseAndValidateManifest(text, origin);
+  const validated = parseAndValidateManifest(text, origin, { tools: opts.tools, source: opts.registrySource });
+  const format = isRegistrySource(text) ? "mcp-registry" : "native";
   const manifest = applyToolsFilter(validated, opts.tools);
   const staged = await stage(text, origin, manifest, opts);
 
@@ -574,6 +609,7 @@ export async function runImport(source: ImportSource, opts: ImportOptions = {}):
   });
 
   return {
+    format,
     staged: staged.path,
     hash: staged.hash,
     source: origin,

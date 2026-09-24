@@ -60,6 +60,7 @@ interface ParsedArgs {
   importYes: boolean;
   importApply: boolean;
   importTools?: Record<string, string[]>;
+  importRegistrySource?: "remote" | "package";
 }
 
 function takeValue(flag: string, argv: string[], i: number): { value?: string; next?: number; error?: string } {
@@ -130,6 +131,16 @@ function parseArgs(argv: string[]): ParsedArgs {
       case "--apply":
         out.importApply = true;
         break;
+      case "--registry-source": {
+        const r = takeValue(a, argv, i);
+        if (r.error || r.value === undefined) return { ...out, error: r.error ?? `option ${a} requires a value` };
+        if (r.value !== "remote" && r.value !== "package") {
+          return { ...out, error: `--registry-source must be "remote" or "package" (got "${r.value}")` };
+        }
+        out.importRegistrySource = r.value;
+        i = (r.next ?? i + 1) - 1;
+        break;
+      }
       case "--tools": {
         const r = takeValue(a, argv, i);
         if (r.error || r.value === undefined) return { ...out, error: r.error ?? `option ${a} requires a value` };
@@ -235,7 +246,10 @@ usage:
 import options:
       --yes              skip the one-shot fetch confirmation prompt
       --apply            promote the staged entry into live config (default: staged only)
-      --tools <s=a,b[;s2=c,d]>  set a server's allowed_tools (each tool must be in its capabilities)
+      --tools <s=a,b[;s2=c,d]>  set a server's allowed_tools (each tool must be in its capabilities;
+                         required for an MCP Registry server.json, which lists no tools)
+      --registry-source <remote|package>  for a registry server.json offering both: use its
+                         hosted endpoint or run its package locally
 
 options:
   -c, --config <path>    path to sandy.json (default: $SANDY_CONFIG or ./sandy.json)
@@ -563,6 +577,9 @@ function formatImportText(r: ImportResult, auditFile?: string): string {
   const lines: string[] = [];
   lines.push("Sandy import");
   lines.push(`  source:  ${r.source}`);
+  if (r.format === "mcp-registry") {
+    lines.push(`  format:  MCP Registry server.json (converted; tools declared by you via --tools)`);
+  }
   lines.push(`  sha256:  ${r.hash}`);
   lines.push(`  staged:  ${r.staged}`);
   lines.push(`  servers:`);
@@ -655,6 +672,7 @@ export async function runCli(argv: string[], overrides: Partial<SandyDeps> = {})
           yes: args.importYes,
           apply: args.importApply,
           tools: args.importTools,
+          registrySource: args.importRegistrySource,
         });
       } finally {
         await audit.close();

@@ -90,6 +90,6 @@ One pipeline, two intake paths, one trust gate. **Nothing is legal because a URL
 
 ## Open questions (deferred)
 
-- Manifest conversion: how far should the deterministic path reach beyond the native schema (e.g. a third-party "server card" registry format)? Start native-only; extend the normalizer later.
+- ~~Manifest conversion~~ — **resolved:** the deterministic path also accepts an MCP Registry `server.json` (`src/import-registry.ts`). The registry format lists no tools, so `--tools` is required; when an entry offers both a hosted remote and a local package, `--registry-source remote|package` is required (a remote sends every query to a third party — an operator decision, not a transcription one). Remote headers, URL templates, unsupported registries/transports, and required arguments without a fixed value are refused fail-closed. The converted candidate still runs through `mcpServersManifestSchema`; the staging hash pins the original `server.json` bytes.
 - `--auto-model` backends: which remote endpoints are sane to allow for the experimental standalone tier, given egress policy.
 - Whether staged imports should also pre-validate that a `stdio` `command` resolves *inside* the sandbox before apply (today this surfaces as reduced mode at startup).
