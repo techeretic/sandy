@@ -337,6 +337,34 @@ describe("Report rendering (RG-02/04/05)", () => {
     expect(md).toContain("abc123");
   });
 
+  it("pairs every footnote reference with exactly one definition (single- and multi-line claims)", () => {
+    // Field-test finding: multi-line claims (most real MCP output) emitted a
+    // definition with no reference, single-line claims a reference with no
+    // definition, and a definition line swallowed the next claim.
+    const src = (task: string) => ({ task, server: "loc", tool: "search", argsHash: `h-${task}`, at: "2026-09-24T00:00:00Z" });
+    const mixed: Claim[] = [
+      { ref: 1, text: "**2 heading(s) found**\n\n## Influenza Epidemic, 1918-1919\n| a | b |", source: src("heading") },
+      { ref: 2, text: "Query: influenza epidemic", source: src("heading") },
+      { ref: 3, text: "33 total", source: src("items") },
+    ];
+    const md = renderMarkdownReport({ goal: "q", title: "Q", claims: mixed, gaps: [], generatedAt: "x" });
+    for (const ref of [1, 2, 3]) {
+      const uses = md.split("\n").filter((l) => l.includes(`[^${ref}]`) && !l.startsWith(`[^${ref}]:`));
+      const defs = md.split("\n").filter((l) => l.startsWith(`[^${ref}]:`));
+      expect(uses, `reference [^${ref}]`).toHaveLength(1);
+      expect(defs, `definition [^${ref}]`).toHaveLength(1);
+      expect(defs[0]).toContain(`h-${mixed[ref - 1]!.source.task}`);
+    }
+    // The multi-line claim is quoted verbatim; its reference is outside the quote.
+    expect(md).toContain("> ## Influenza Epidemic, 1918-1919\n> | a | b |\n\n\u2014 `loc/search` [^1]");
+    // Each claim is its own block: the single-line claim after the quote is not
+    // glued to the previous line.
+    expect(md).toContain("[^1]\n\nQuery: influenza epidemic [^2]\n");
+    // Definitions come after every claim (no claim text follows one).
+    const lastDef = md.lastIndexOf("[^3]:");
+    expect(lastDef).toBeGreaterThan(md.indexOf("33 total [^3]"));
+  });
+
   it("renders an explicit Gaps section", () => {
     const md = renderMarkdownReport({ goal: "q", title: "Q", claims, gaps, generatedAt: "x" });
     expect(md).toContain("## Gaps");

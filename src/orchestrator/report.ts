@@ -114,13 +114,14 @@ export function renderMarkdownReport(input: RenderReportInput): string {
     lines.push("## Findings");
     lines.push("");
     for (const [task, claims] of byTask) {
-      const first = claims[0] as Claim;
       lines.push(`### ${task}`);
       lines.push("");
+      // One block per claim: without the blank line, consecutive claims run
+      // together into one paragraph (or into the previous block).
       for (const claim of claims) {
         lines.push(renderClaimLine(claim));
+        lines.push("");
       }
-      lines.push("");
     }
   } else {
     lines.push("## Findings");
@@ -158,6 +159,14 @@ export function renderMarkdownReport(input: RenderReportInput): string {
         `| [${claim.ref}] | \`${claim.source.server}\` | \`${claim.source.tool}\` | \`${claim.source.argsHash}\` | ${claim.source.at} |`,
       );
     }
+    // Footnote definitions: exactly one per claim, each matching the one
+    // reference in its claim, so every `[^n]` resolves to its source call.
+    lines.push("");
+    for (const claim of input.claims) {
+      lines.push(
+        `[^${claim.ref}]: \`${claim.source.server}/${claim.source.tool}\` · args sha256 \`${claim.source.argsHash}\` · ${claim.source.at}`,
+      );
+    }
   }
   lines.push("");
 
@@ -165,15 +174,18 @@ export function renderMarkdownReport(input: RenderReportInput): string {
 }
 
 function renderClaimLine(claim: Claim): string {
-  // Preserve the source text, appending the footnote. Multi-line text gets a
-  // blockquote so the footnote stays attached to the last line.
+  // Preserve the source text and attach exactly one footnote REFERENCE; the
+  // matching definition is emitted with the Provenance section. Multi-line
+  // text (most real MCP output) is quoted verbatim, and its reference goes on
+  // a line of its own after the quote — appending it to the last quoted line
+  // could land inside a table row, code fence, or heading.
   const text = claim.text;
   if (isMultiLine(text)) {
     const quoted = text
       .split("\n")
-      .map((l) => `> ${l}`)
+      .map((l) => (l.length > 0 ? `> ${l}` : ">"))
       .join("\n");
-    return `${quoted}\n\n[^${claim.ref}]: source: \`${claim.source.server}/${claim.source.tool}\``;
+    return `${quoted}\n\n\u2014 \`${claim.source.server}/${claim.source.tool}\` [^${claim.ref}]`;
   }
   return `${text} [^${claim.ref}]`;
 }
