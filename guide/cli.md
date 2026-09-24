@@ -42,8 +42,8 @@ sandy <verb> [options]
 | Code | Meaning |
 |------|---------|
 | `0` | OK. A *degraded* state is **reported**, not fatal. |
-| `1` | Unexpected error. |
-| `2` | Usage error (unknown verb/flag, invalid request file, unknown template, invalid import source, cancelled import fetch). |
+| `1` | Unexpected error — or a `run`/`ask` that gathered data but could not write its report (the claims/gaps are still printed, with `report: NOT WRITTEN — <reason>`). |
+| `2` | Usage error (unknown verb/flag, invalid request file, unknown template, a `report.file` whose extension the configured `default_report_format` can't be written under — refused before any MCP call, invalid import source, cancelled import fetch). |
 | `3` | Config error (fail-closed: invalid config, missing env, egress cross-check). |
 | `4` | Sandbox violation (unsandboxed, or declared/detected runtime mismatch). |
 

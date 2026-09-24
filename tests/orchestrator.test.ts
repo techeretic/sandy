@@ -21,6 +21,7 @@ import {
   reportFormatExtension,
   REPORT_FORMATS,
   isBinaryReportFormat,
+  reportFileFormatMismatch,
   Orchestrator,
   PolicyApprovalGate,
   ReadOnlyGate,
@@ -411,6 +412,19 @@ describe("Report formats (issue #14): claims/provenance survive the transform", 
     expect(isBinaryReportFormat("pdf")).toBe(true);
     expect(isBinaryReportFormat("markdown")).toBe(false);
     expect(isBinaryReportFormat("html")).toBe(false);
+  });
+
+  it("reportFileFormatMismatch mirrors the File Manager's write-time rules", () => {
+    // Binary formats need their own extension.
+    expect(reportFileFormatMismatch("pdf", "r.pdf")).toBeNull();
+    expect(reportFileFormatMismatch("pdf", "dir/R.PDF")).toBeNull();
+    expect(reportFileFormatMismatch("pdf", "r.md")).toMatch(/does not match the configured report format "pdf".*\.pdf filename/);
+    expect(reportFileFormatMismatch("docx", "r.xlsx")).not.toBeNull();
+    // Text formats accept text names, never a binary or structured-data one.
+    expect(reportFileFormatMismatch("markdown", "r.md")).toBeNull();
+    expect(reportFileFormatMismatch("html", "r.html")).toBeNull();
+    expect(reportFileFormatMismatch("markdown", "r.pdf")).not.toBeNull();
+    expect(reportFileFormatMismatch("markdown", "r.json")).not.toBeNull();
   });
 
   it("renderReportArtifact dispatches to the right renderer per format", () => {

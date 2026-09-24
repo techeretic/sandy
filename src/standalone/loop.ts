@@ -102,6 +102,9 @@ export interface LoopResult {
    *  every format, so a binary format (docx/xlsx/pdf) carries its on-disk
    *  bytes in-band instead of a (non-UTF-8) string. */
   reportArtifactB64?: string;
+  /** Why the report was not written, when the write failed (the gathered
+   *  claims/gaps are still returned). */
+  reportError?: string;
   transcript: Transcript;
   /** How the round-1 plan was produced (model / deterministic fallback / refused). */
   plan: {
@@ -452,6 +455,7 @@ export class AutonomousLoop {
       reportPath,
       reportContent,
       reportArtifactB64,
+      ...(first.reportError !== undefined ? { reportError: first.reportError } : {}),
       transcript: first.transcript,
       plan,
       request,

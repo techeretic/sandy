@@ -147,6 +147,7 @@ export {
 export {
   REPORT_FORMATS,
   isBinaryReportFormat,
+  reportFileFormatMismatch,
   reportFormatExtension,
   renderHtmlReport,
   renderMarkdownReport,

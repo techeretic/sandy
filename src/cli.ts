@@ -19,6 +19,7 @@ import type {
 import { NoModelEngineError, type LoopResult } from "./standalone/loop.js";
 import { createLocalApi } from "./standalone/api.js";
 import { ImportError, runImport, type ImportResult } from "./import.js";
+import { reportFileFormatMismatch } from "./orchestrator/report.js";
 import { InMemoryAuditLogger, JsonlAuditLogger } from "./audit/logger.js";
 
 export const CLI_NAME = "sandy";
@@ -26,8 +27,10 @@ export const CLI_NAME = "sandy";
 /**
  * Exit codes — stable contract for callers/CI:
  *   0  ok (boundary intact; a *degraded* state is reported, not fatal)
- *   1  unexpected error
- *   2  bad usage (unknown verb / flags, an invalid request file, or an unknown template name)
+ *   1  unexpected error, or a run/ask whose report could not be written (the
+ *      gathered claims/gaps are still printed)
+ *   2  bad usage (unknown verb / flags, an invalid request file, an unknown
+ *      template name, or a report filename the configured format can't use)
  *   3  config error (fail-closed: invalid config, missing env, VPN-02)
  *   4  sandbox violation (unsandboxed or declared/detected runtime mismatch)
  */
@@ -358,6 +361,7 @@ function formatRunText(r: OrchestratorResult, auditFile?: string): string {
     lines.push(`    \u2212 ${g.task} (${g.server}/${g.tool}): ${g.reason} \u2014 ${g.detail}`);
   }
   if (r.reportPath) lines.push(`  report:  ${r.reportPath}`);
+  if (r.reportError) lines.push(`  report:  NOT WRITTEN \u2014 ${r.reportError}`);
   lines.push(`  audit:   ${auditFile ?? "in-memory"}`);
   return lines.join("\n");
 }
@@ -393,6 +397,7 @@ function formatAskText(r: LoopResult, auditFile?: string): string {
     for (const line of r.narrative.text.split("\n")) lines.push(`    ${line}`);
   }
   if (r.reportPath) lines.push(`  report:  ${r.reportPath}`);
+  if (r.reportError) lines.push(`  report:  NOT WRITTEN \u2014 ${r.reportError}`);
   lines.push(`  audit:   ${auditFile ?? "in-memory"}`);
   return lines.join("\n");
 }
@@ -578,6 +583,17 @@ function formatImportText(r: ImportResult, auditFile?: string): string {
   return lines.join("\n");
 }
 
+/**
+ * A run/ask that gathered data but failed to write its report is not a
+ * success: the claims/gaps were printed, but no artifact exists, so a caller
+ * (or CI) must not see exit 0.
+ */
+function reportExit(reportError: string | undefined): number {
+  if (reportError === undefined) return EXIT.ok;
+  process.stderr.write(`error: report not written: ${reportError}\n`);
+  return EXIT.error;
+}
+
 function translateError(err: unknown): RunError {
   if (err instanceof UsageError) return new RunError(EXIT.usage, err.message);
   // `ask` against a host engine is a mode mismatch, not a crash: a reported
@@ -654,7 +670,7 @@ export async function runCli(argv: string[], overrides: Partial<SandyDeps> = {})
       const result = await withSandy(args, (s) => s.ask(args.goal!), overrides);
       if (args.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
       else process.stdout.write(formatAskText(result, args.auditFile) + "\n");
-      return EXIT.ok;
+      return reportExit(result.reportError);
     }
     // verb === "run"
     // The target is a request file or a template name (issue #15). A target
@@ -675,13 +691,19 @@ export async function runCli(argv: string[], overrides: Partial<SandyDeps> = {})
     const runRequest =
       request.report === undefined ? { ...request, report: {} } : request;
     const result = await withSandy(args, (s) => {
+      // An explicit report filename that the configured format cannot be
+      // written under would only fail after every MCP call had run: refuse it
+      // up front (usage), before anything is gathered.
+      const file = runRequest.report?.file;
+      const mismatch = file === undefined ? null : reportFileFormatMismatch(s.loaded.reportFormat, file);
+      if (mismatch !== null) throw new UsageError(mismatch);
       // A template run is a distinct audited fact (AU-01, issue #15).
       if (template !== undefined) s.audit.append("template_run", { template });
       return s.run(runRequest);
     }, overrides);
     if (args.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     else process.stdout.write(formatRunText(result, args.auditFile) + "\n");
-    return EXIT.ok;
+    return reportExit(result.reportError);
   } catch (err) {
     const runErr = translateError(err);
     process.stderr.write(`error: ${runErr.message}\n`);
