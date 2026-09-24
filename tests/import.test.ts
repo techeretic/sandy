@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
@@ -298,8 +299,32 @@ describe("runImport (staged pipeline)", () => {
       const fetchEvent = audit.events()[0]!;
       expect(fetchEvent.data.url).toBe(`${server.url}/m.json`);
       expect(fetchEvent.data.sha256).toBe(result.hash);
+      expect(fetchEvent.data.outcome).toBe("ok");
       expect(result.review.networkLines).toEqual([]); // stdio: no egress
       expect(result.review.envNames).toEqual(["CRM_API_KEY"]);
+    } finally {
+      if (server) await server.close();
+    }
+  });
+
+  it("audits a failed fetch (HTTP error status) and stages nothing", async () => {
+    let server: TestServer | undefined;
+    try {
+      server = await startTestServer((_req, res) => {
+        res.writeHead(403, { "content-type": "text/html" });
+        res.end("forbidden");
+      });
+      const stageDir = path.join(root, "staged-403");
+      const audit = new InMemoryAuditLogger();
+      await expect(
+        runImport({ url: `${server.url}/m.json` }, { stageDir, audit, confirm: async () => true }),
+      ).rejects.toThrowError(/HTTP 403/);
+      const events = audit.events();
+      expect(events.map((e) => e.type)).toEqual(["import_fetch"]);
+      expect(events[0]!.data.url).toBe(`${server.url}/m.json`);
+      expect(events[0]!.data.outcome).toBe("error");
+      expect(String(events[0]!.data.error)).toMatch(/HTTP 403/);
+      expect(existsSync(stageDir)).toBe(false);
     } finally {
       if (server) await server.close();
     }
