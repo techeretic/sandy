@@ -472,6 +472,78 @@ describe("runImport --apply (the only path that touches live config)", () => {
     }
   });
 
+  it("bootstraps the first server when the declared manifest does not exist yet", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "sandy-import-bootstrap-"));
+    try {
+      const config = path.join(root, "sandy.json");
+      await writeFile(config, JSON.stringify(mainBase, null, 2), "utf8");
+      process.env.CRM_API_KEY = "k";
+      const src = path.join(root, "src.json");
+      await writeFile(src, JSON.stringify(stdioManifest), "utf8");
+      const result = await runImport(
+        { file: src },
+        { stageDir: path.join(root, "staged"), configPath: config, apply: true },
+      );
+      expect(result.applied).toBe(true);
+      const created = JSON.parse(await readFile(path.join(root, "mcp-servers.json"), "utf8"));
+      expect(created).toEqual(stdioManifest);
+    } finally {
+      delete process.env.CRM_API_KEY;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("bootstraps into an existing manifest that has no servers", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "sandy-import-bootstrap-empty-"));
+    try {
+      const config = path.join(root, "sandy.json");
+      await writeFile(config, JSON.stringify(mainBase, null, 2), "utf8");
+      await writeFile(path.join(root, "mcp-servers.json"), JSON.stringify({ servers: [] }), "utf8");
+      process.env.CRM_API_KEY = "k";
+      const src = path.join(root, "src.json");
+      await writeFile(src, JSON.stringify(stdioManifest), "utf8");
+      await runImport({ file: src }, { stageDir: path.join(root, "staged"), configPath: config, apply: true });
+      const merged = JSON.parse(await readFile(path.join(root, "mcp-servers.json"), "utf8"));
+      expect(merged).toEqual(stdioManifest);
+    } finally {
+      delete process.env.CRM_API_KEY;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("a refused bootstrap removes the manifest it created", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "sandy-import-bootstrap-refused-"));
+    try {
+      const config = path.join(root, "sandy.json");
+      await writeFile(config, JSON.stringify(mainBase, null, 2), "utf8");
+      delete process.env.CRM_API_KEY; // the staged server's env ref is unset → the final gate refuses
+      const src = path.join(root, "src.json");
+      await writeFile(src, JSON.stringify(stdioManifest), "utf8");
+      await expect(
+        runImport({ file: src }, { stageDir: path.join(root, "staged"), configPath: config, apply: true }),
+      ).rejects.toThrowError(/does not validate/);
+      expect(existsSync(path.join(root, "mcp-servers.json"))).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not bootstrap over a broken config (still fails closed)", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "sandy-import-broken-"));
+    try {
+      const config = path.join(root, "sandy.json");
+      await writeFile(config, JSON.stringify({ ...mainBase, mode: "nonsense" }), "utf8");
+      const src = path.join(root, "src.json");
+      await writeFile(src, JSON.stringify(stdioManifest), "utf8");
+      await expect(
+        runImport({ file: src }, { stageDir: path.join(root, "staged"), configPath: config, apply: true }),
+      ).rejects.toThrowError(/cannot apply/);
+      expect(existsSync(path.join(root, "mcp-servers.json"))).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("the final gate re-validates: a VPN-02 violation cannot ship", async () => {
     // A manifest whose endpoint is NEVER in allowed_network and whose network
     // line we refuse to add: simulate by importing a remote server into a
@@ -502,9 +574,14 @@ describe("runImport --apply (the only path that touches live config)", () => {
       delete process.env.UNSET_VAR_XYZ;
       const src = path.join(root, "src.json");
       await writeFile(src, JSON.stringify(noEnvManifest), "utf8");
+      const beforeMain = await readFile(config, "utf8");
+      const beforeManifest = await readFile(path.join(root, "mcp-servers.json"), "utf8");
       await expect(
         runImport({ file: src }, { stageDir: path.join(root, "staged"), configPath: config, apply: true }),
-      ).rejects.toThrowError(/does not validate/);
+      ).rejects.toThrowError(/does not validate.*left unchanged/);
+      // Rolled back: a refused apply leaves both live files byte-identical.
+      expect(await readFile(config, "utf8")).toBe(beforeMain);
+      expect(await readFile(path.join(root, "mcp-servers.json"), "utf8")).toBe(beforeManifest);
     } finally {
       delete process.env.CRM_API_KEY;
       delete process.env.JIRA_TOKEN;
