@@ -6,7 +6,7 @@ import {
   type CapabilityReport,
 } from "./capabilities.js";
 import { PathConfinement, SandboxViolationError } from "./confinement.js";
-import { detectRuntime, type RuntimeDetection } from "./detect.js";
+import { detectRuntime, UNDETECTABLE_RUNTIMES, type RuntimeDetection } from "./detect.js";
 
 export interface SandboxEnforcerOptions {
   /** Injectable for tests. */
@@ -69,7 +69,7 @@ export class SandboxEnforcer {
       throw new SandboxViolationError(
         "root-missing",
         "",
-        "Sandy requires a sandbox boundary; none detected. Refusing to start.",
+        `Sandy requires a sandbox boundary; none detected. Refusing to start.${undetectedHint(declared)}`,
       );
     }
 
@@ -97,3 +97,14 @@ export class SandboxEnforcer {
 }
 
 export type { CapabilityManifest, CapabilityReport };
+
+/** A pointer for a declared runtime that detection did not confirm. */
+function undetectedHint(declared: string): string {
+  if (UNDETECTABLE_RUNTIMES.includes(declared)) {
+    return ` Sandy cannot detect "${declared}" yet; if you manage this boundary yourself, declare sandbox.runtime "custom".`;
+  }
+  if (declared === "macos-sandbox-exec") {
+    return ` Declared "macos-sandbox-exec", but no restrictive Seatbelt profile is in force; start Sandy under \`sandbox-exec -f <profile>\` (a profile with at least one deny rule).`;
+  }
+  return "";
+}

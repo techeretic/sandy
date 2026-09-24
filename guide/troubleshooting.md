@@ -35,7 +35,7 @@ Read it top to bottom:
 
 ### "Sandy requires a sandbox boundary; none detected" (exit 4)
 
-You're running unsandboxed. That's a feature: Sandy refuses to start without a boundary. Run it inside Docker, Firejail, WSL, gVisor, etc. If you manage a custom boundary yourself, declare `sandbox.runtime: "custom"` (the one case where "no detector match" is permitted).
+You're running unsandboxed. That's a feature: Sandy refuses to start without a boundary. Run it inside Docker, Firejail, WSL, gVisor, or (on macOS) `sandbox-exec -f <profile>` with a profile that has at least one deny rule. If you manage a custom boundary yourself — or use `systemd-nspawn`, `chroot`, or `windows-appcontainer`, which Sandy cannot detect yet — declare `sandbox.runtime: "custom"` (the one case where "no detector match" is permitted). The error message names the fix for the runtime you declared.
 
 ### "config declares sandbox runtime "X" but the detected runtime is "Y"" (exit 4)
 
