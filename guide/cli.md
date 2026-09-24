@@ -106,7 +106,9 @@ node bin/sandy.js import https://registry.internal/servers/jira.json \
 Exit codes follow the stable contract: usage-class errors (bad source, cancelled
 fetch) exit `2`; fail-closed validation/config errors exit `3`. The fetch and the
 stage/apply decision are recorded in the audit log (`import_fetch`,
-`import_staged`) when `-o, --audit <path>` is given.
+`import_staged`) when `-o, --audit <path>` is given. A fetch that fails (DNS,
+TLS, an HTTP error status, an oversize body) is still recorded as an
+`import_fetch` event with `outcome: "error"` — the dial is audited either way.
 
 ## Reading the output
 

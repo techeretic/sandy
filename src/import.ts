@@ -484,8 +484,16 @@ export async function runImport(source: ImportSource, opts: ImportOptions = {}):
       throw new ImportError(2, "import cancelled (fetch not confirmed)");
     }
     const doFetch = opts.fetcher ?? fetchImportManifest;
-    const fetched = await doFetch(source.url, IMPORT_DEFAULTS);
-    audit.append("import_fetch", { url: source.url, finalUrl: fetched.finalUrl, sha256: sha256Hex(fetched.text), bytes: fetched.bytes });
+    let fetched: ImportFetchResult;
+    try {
+      fetched = await doFetch(source.url, IMPORT_DEFAULTS);
+    } catch (err) {
+      // A failed fetch may still have dialed out (DNS, TLS, an HTTP error
+      // status, an oversize body): the egress exception is audited either way.
+      audit.append("import_fetch", { url: source.url, outcome: "error", error: (err as Error).message });
+      throw err;
+    }
+    audit.append("import_fetch", { url: source.url, outcome: "ok", finalUrl: fetched.finalUrl, sha256: sha256Hex(fetched.text), bytes: fetched.bytes });
     text = fetched.text;
     origin = fetched.finalUrl;
   } else if (source.stdin === true) {
