@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { appendFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import type { McpCallRecord, McpAuditSink } from "../mcp/types.js";
@@ -38,6 +39,12 @@ export type AuditEventType =
   | "import_staged";
 
 export interface AuditEvent {
+  /**
+   * Random id of the logger session (one Sandy process / invocation). Several
+   * sessions may append to the same JSONL file, so `seq` alone is not unique
+   * there: `(session, seq)` is. Order across sessions by `at`.
+   */
+  session: string;
   /** Monotonic sequence number within the session (1-based). */
   seq: number;
   /** ISO-8601 timestamp. */
@@ -73,6 +80,7 @@ export class InMemoryAuditLogger implements AuditLogger {
   private readonly entries: AuditEvent[] = [];
   private seq = 0;
   private readonly payloadLogging: boolean;
+  readonly session: string = randomUUID();
 
   constructor(options: { auditPayloadLogging?: boolean } = {}) {
     this.payloadLogging = options.auditPayloadLogging ?? false;
@@ -80,6 +88,7 @@ export class InMemoryAuditLogger implements AuditLogger {
 
   append(type: AuditEventType, data: Record<string, unknown>, opts?: { payload?: unknown }): AuditEvent {
     const event: AuditEvent = {
+      session: this.session,
       seq: ++this.seq,
       at: new Date().toISOString(),
       type,

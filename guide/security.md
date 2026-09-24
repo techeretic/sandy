@@ -66,7 +66,7 @@ The gate's refusal reasons are distinct and each is audited: `not-allowed-by-pol
 
 ## The audit log
 
-Append-only, structured, and **fail-closed** (a disk write failure is surfaced to stderr and reported on `close()`, never swallowed). Two backends: in-memory (session-scoped, tests) and **JSONL** (one JSON object per line, ordered). Every event carries a monotonic `seq`, an ISO timestamp, a `type`, and structured `data`.
+Append-only, structured, and **fail-closed** (a disk write failure is surfaced to stderr and reported on `close()`, never swallowed). Two backends: in-memory (session-scoped, tests) and **JSONL** (one JSON object per line, ordered). Every event carries a `session` id (random, one per Sandy invocation), a `seq` that is monotonic **within** that session, an ISO timestamp, a `type`, and structured `data`. Several invocations may append to the same `--audit` file, so `seq` restarts per session: `(session, seq)` identifies an event, and `at` orders events across sessions.
 
 Event types:
 
