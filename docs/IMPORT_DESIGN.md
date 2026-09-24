@@ -67,6 +67,8 @@ One pipeline, two intake paths, one trust gate. **Nothing is legal because a URL
 5. **Apply** (explicit)
    - Only `--apply` — or the operator manually applying the staged diff — promotes the entry into `mcp-servers.json` (and, when `--apply` is used, appends the `allowed_network` lines to `sandy.json`).
    - **Name collision with an existing server → hard failure**, never an overwrite. Re-importing the same content is a no-op (hash match).
+   - **First server (bootstrap):** when `sandy.json` itself is valid but the manifest it declares does not exist yet, or is `{"servers": []}` (which the loader rejects — at least one server is required), `--apply` creates it from the staged entry. Any other load failure is still `cannot apply` (exit 3).
+   - **Atomic from the operator's view:** both files are snapshotted before writing; if the final re-validation refuses the result, they are restored byte-for-byte (a manifest the apply created is removed) — a refused apply leaves the live config unchanged.
 
 ## Edge cases
 

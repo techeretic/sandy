@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { InMemoryAuditLogger, JsonlAuditLogger, type AuditLogger } from "./audit/logger.js";
 import { loadSandyConfig, type LoadedConfig } from "./config/loader.js";
-import { mcpServersManifestSchema, type McpServersManifest } from "./config/schema.js";
+import { mcpServersManifestSchema, sandyConfigSchema, type McpServersManifest } from "./config/schema.js";
 
 /**
  * `sandy import` (docs/IMPORT_DESIGN.md) — URL- and file-driven MCP server
@@ -422,48 +422,98 @@ async function stage(
  * the file's JSON style), and re-runs the FULL config load as the final gate
  * before the result ships.
  */
+/**
+ * The manifest path `--apply` may bootstrap: `sandy.json` itself is valid, but
+ * the MCP server manifest it declares does not exist yet, or holds no servers
+ * (`{"servers": []}`, which the loader rejects: at least one is required).
+ * Returns undefined when the config is broken for any other reason.
+ */
+async function bootstrappableManifest(configPath: string): Promise<string | undefined> {
+  let main: unknown;
+  try {
+    main = JSON.parse(await readFile(configPath, "utf8"));
+  } catch {
+    return undefined;
+  }
+  const parsed = sandyConfigSchema.safeParse(main);
+  if (!parsed.success) return undefined;
+  const ref = parsed.data.mcp_servers;
+  const manifestPath = path.isAbsolute(ref) ? ref : path.resolve(path.dirname(path.resolve(configPath)), ref);
+  let raw: string;
+  try {
+    raw = await readFile(manifestPath, "utf8");
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT" ? manifestPath : undefined;
+  }
+  try {
+    const existing = JSON.parse(raw) as unknown;
+    const servers = (existing as { servers?: unknown }).servers;
+    return Array.isArray(servers) && servers.length === 0 ? manifestPath : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function applyStaged(staged: StagedImport, opts: ImportOptions): Promise<void> {
   const configPath = opts.configPath ?? process.env["SANDY_CONFIG"] ?? "sandy.json";
-  let loaded: LoadedConfig;
+  let manifestPath: string;
   try {
-    loaded = await loadSandyConfig(configPath);
+    const loaded: LoadedConfig = await loadSandyConfig(configPath);
+    for (const server of staged.manifest.servers) {
+      if (loaded.manifest.servers.some((s) => s.name === server.name)) {
+        throw new ImportError(
+          3,
+          `server "${server.name}" already exists in ${loaded.manifestPath} — import refuses to overwrite existing servers`,
+        );
+      }
+    }
+    manifestPath = loaded.manifestPath;
   } catch (err) {
-    throw new ImportError(3, `cannot apply: ${(err instanceof Error ? err.message : String(err))}`);
-  }
-  for (const server of staged.manifest.servers) {
-    if (loaded.manifest.servers.some((s) => s.name === server.name)) {
-      throw new ImportError(
-        3,
-        `server "${server.name}" already exists in ${loaded.manifestPath} — import refuses to overwrite existing servers`,
-      );
+    if (err instanceof ImportError) throw err;
+    // First server: the config is fine but its manifest is missing or empty,
+    // so there is nothing to load yet. Create it from the staged entry; the
+    // final gate below still validates the result as a whole.
+    const bootstrap = await bootstrappableManifest(configPath);
+    if (bootstrap === undefined) {
+      throw new ImportError(3, `cannot apply: ${(err instanceof Error ? err.message : String(err))}`);
     }
+    manifestPath = bootstrap;
   }
-  // Merge the manifest, preserving existing entries' key order (JSON.parse
-  // keeps string-key order) and the file's 2-space style.
-  const rawManifest = JSON.parse(await readFile(loaded.manifestPath, "utf8")) as {
-    servers: unknown[];
-  };
-  rawManifest.servers.push(...staged.manifest.servers);
-  await writeFile(loaded.manifestPath, `${JSON.stringify(rawManifest, null, 2)}\n`, "utf8");
-  // Merge the computed allowed_network entries into sandy.json (deduped).
-  if (staged.networkLines.length > 0) {
-    const rawMain = JSON.parse(await readFile(configPath, "utf8")) as {
-      sandbox: { allowed_network?: string[] };
-    };
-    const existing = rawMain.sandbox.allowed_network ?? [];
-    const additions = staged.networkLines.filter((line) => !existing.includes(line));
-    if (additions.length > 0) {
-      rawMain.sandbox.allowed_network = [...existing, ...additions];
-      await writeFile(configPath, `${JSON.stringify(rawMain, null, 2)}\n`, "utf8");
-    }
-  }
-  // Final gate: the merged config must load cleanly (VPN-02 cross-check,
-  // env refs, schema) — fail-closed, never ship a broken config.
+
+  // Snapshot the live config so a failed final gate leaves it untouched.
+  const originalManifest = await readFile(manifestPath, "utf8").catch(() => undefined);
+  const originalMain = await readFile(configPath, "utf8");
   try {
+    // Merge the manifest, preserving existing entries' key order (JSON.parse
+    // keeps string-key order) and the file's 2-space style.
+    const rawManifest = (originalManifest === undefined ? { servers: [] } : JSON.parse(originalManifest)) as {
+      servers: unknown[];
+    };
+    rawManifest.servers.push(...staged.manifest.servers);
+    await writeFile(manifestPath, `${JSON.stringify(rawManifest, null, 2)}\n`, "utf8");
+    // Merge the computed allowed_network entries into sandy.json (deduped).
+    if (staged.networkLines.length > 0) {
+      const rawMain = JSON.parse(originalMain) as {
+        sandbox: { allowed_network?: string[] };
+      };
+      const existing = rawMain.sandbox.allowed_network ?? [];
+      const additions = staged.networkLines.filter((line) => !existing.includes(line));
+      if (additions.length > 0) {
+        rawMain.sandbox.allowed_network = [...existing, ...additions];
+        await writeFile(configPath, `${JSON.stringify(rawMain, null, 2)}\n`, "utf8");
+      }
+    }
+    // Final gate: the merged config must load cleanly (VPN-02 cross-check,
+    // env refs, schema) — fail-closed, never ship a broken config.
     await loadSandyConfig(configPath);
   } catch (err) {
+    // Roll back: restore both files byte-for-byte (or remove a manifest this
+    // apply created), so a refused apply changes nothing.
+    if (originalManifest === undefined) await rm(manifestPath, { force: true });
+    else await writeFile(manifestPath, originalManifest, "utf8");
+    await writeFile(configPath, originalMain, "utf8");
     const msg = err instanceof Error ? err.message : String(err);
-    throw new ImportError(3, `applied config does not validate (fail-closed): ${msg}`);
+    throw new ImportError(3, `applied config does not validate (fail-closed; live config left unchanged): ${msg}`);
   }
 }
 
