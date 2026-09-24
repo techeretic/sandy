@@ -955,6 +955,48 @@ describe("runCli: verbs + exit codes (real stdio MCP server)", () => {
     });
   });
 
+  it("run refuses a report filename the configured format can't use, before gathering", async () => {
+    // Field-test finding: default_report_format "pdf" + a request naming
+    // "deals.md" gathered everything, then silently wrote no report (exit 0).
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, {
+      allowedPaths: [ws],
+      crmCommand: stdioCommand,
+      preferences: { default_report_format: "pdf" },
+    });
+    const req = await writeRequest(ws, {
+      goal: "deals",
+      gather: [{ id: "deals", server: "crm", tool: "read_deals", args: { region: "emea" } }],
+      report: { title: "Deals", file: "deals.md" },
+    });
+    const audit = path.join(ws, "audit.jsonl");
+    const { value, stderr } = await captureStdout(() =>
+      runCli(["run", req, "--config", cfg, "--no-progress", "--audit", audit], cliOverrides),
+    );
+    expect(value).toBe(EXIT.usage);
+    expect(stderr).toMatch(/does not match the configured report format "pdf"/);
+    // Nothing was gathered: no MCP call was audited (the log may not exist at all).
+    const log = await fsRead(audit, "utf8").catch(() => "");
+    expect(log).not.toContain('"type":"mcp_call"');
+  });
+
+  it("run whose report write fails prints the reason and exits non-zero", async () => {
+    const { cfg, ws } = await fixtures();
+    const req = await writeRequest(ws, {
+      goal: "deals",
+      gather: [{ id: "deals", server: "crm", tool: "read_deals", args: { region: "emea" } }],
+      // Escapes the working root: the File Manager refuses the write.
+      report: { title: "Deals", file: "../../outside.md" },
+    });
+    const { value, stdout, stderr } = await captureStdout(() =>
+      runCli(["run", req, "--config", cfg, "--no-progress"], cliOverrides),
+    );
+    expect(value).toBe(EXIT.error);
+    expect(stdout).toContain("2 deals closed in emea"); // the gathered data is still shown
+    expect(stdout).toMatch(/report: {2}NOT WRITTEN/);
+    expect(stderr).toMatch(/report not written/);
+  });
+
   it("run <unknown-name> (no such file, no template) exits with the usage code", async () => {
     const ws = await tmpWorkspace();
     const cfg = await writeConfig(ws, {

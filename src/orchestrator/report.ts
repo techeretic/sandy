@@ -1,3 +1,5 @@
+import path from "node:path";
+import { detectFormat, isBinaryFormat } from "../files/format.js";
 import type { RenderReportInput } from "./orchestrator.js";
 import type { Claim, Gap } from "./orchestrator.js";
 import { renderDocxReport } from "./docx.js";
@@ -27,6 +29,24 @@ const REPORT_FORMAT_EXTENSION: Record<ReportFormat, string> = {
 /** The file extension a report should be written under, per format. */
 export function reportFormatExtension(format: ReportFormat): string {
   return REPORT_FORMAT_EXTENSION[format];
+}
+
+/**
+ * Pre-flight check for an explicit report filename: would the File Manager
+ * accept a report of `format` written under `file`? It mirrors the write-time
+ * rules (a binary format needs its own extension; a text format may not use a
+ * binary or structured-data extension), so a mismatch fails before any MCP
+ * call is made rather than after the data is gathered. Returns the reason, or
+ * null when the name is fine.
+ */
+export function reportFileFormatMismatch(format: ReportFormat, file: string): string | null {
+  const detected = detectFormat(path.basename(file));
+  if (isBinaryReportFormat(format)) {
+    if (detected === format) return null;
+  } else if (!isBinaryFormat(detected) && detected !== "json" && detected !== "csv") {
+    return null;
+  }
+  return `report file "${file}" does not match the configured report format "${format}" (preferences.default_report_format) — use a ${reportFormatExtension(format)} filename`;
 }
 
 /** Is this format a binary artifact (DOCX/XLSX/PDF), written as raw bytes? */

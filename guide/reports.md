@@ -73,7 +73,7 @@ The narrative is a convenience, not a second source of truth. The Findings/Prove
 
 Reports are written **inside the working roots** (under `report_output_dir`) through the File Manager — the same confinement, confirmation, ignore-pattern, and undo-journal gates as any other file operation. Overwriting an existing report is confirmation-gated per `policy.confirmation_required`.
 
-- **CLI:** `sandy run <request.json|template>` writes `reportOutputDir/<file>` (the `report.file` in the request).
+- **CLI:** `sandy run <request.json|template>` writes `reportOutputDir/<file>` (the `report.file` in the request). The file's extension must suit `default_report_format` (e.g. `.pdf` for `pdf`); a mismatch is refused with exit `2` before any MCP call. If the report write itself fails, the CLI prints `report: NOT WRITTEN — <reason>` and exits `1`.
 - **Plugin:** `sandy.report` returns the report path + content.
 - **Service:** `POST /run` enqueues a run; `GET /jobs/:id` returns the result; `GET /reports` lists the confined reports dir.
 
