@@ -246,6 +246,34 @@ describe("runImport (staged pipeline)", () => {
     expect(types).toEqual(["import_staged"]);
   });
 
+  it("default stage dir anchors to the CONFIG dir, not the cwd (no stray .sandy-import in cwd)", async () => {
+    // The reported gap: `path.resolve(".sandy-import")` staged relative to the
+    // process cwd, so a `sandy import` run from another directory left a stray
+    // dir behind. It must mirror `report_output_dir` and anchor to the config
+    // dir. We prove it by pointing configPath at a DIFFERENT temp dir than the
+    // cwd and asserting the staged file lands there.
+    const configDir = await mkdtemp(path.join(tmpdir(), "sandy-import-cfgdir-"));
+    const src = path.join(root, "src-anchor.json");
+    await writeFile(src, JSON.stringify(validManifest), "utf8");
+    // configPath is only resolved (dirname) for staging; it need not load.
+    const configPath = path.join(configDir, "sandy.json");
+    const result = await runImport({ file: src }, { configPath });
+    expect(path.dirname(result.staged)).toBe(path.join(configDir, ".sandy-import"));
+    // And NOT under the process cwd.
+    expect(path.dirname(result.staged)).not.toBe(path.resolve(".sandy-import"));
+    await rm(configDir, { recursive: true, force: true });
+  });
+
+  it("an explicit stageDir override is honored verbatim (cwd-relative)", async () => {
+    const src = path.join(root, "src-override.json");
+    await writeFile(src, JSON.stringify(validManifest), "utf8");
+    // A relative override resolves against the cwd, as documented.
+    const stageDir = ".sandy-import-override-test";
+    const result = await runImport({ file: src }, { stageDir });
+    expect(path.dirname(result.staged)).toBe(path.resolve(stageDir));
+    await rm(path.resolve(stageDir), { recursive: true, force: true });
+  });
+
   it("stages a URL source with the confirm seam; refuses without confirmation", async () => {
     let server: TestServer | undefined;
     try {

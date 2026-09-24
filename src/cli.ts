@@ -666,10 +666,18 @@ export async function runCli(argv: string[], overrides: Partial<SandyDeps> = {})
       args.runTarget!,
       resolveConfigPath(args.configPath),
     );
+    // `run` is a report-producing verb (design §2.1: the run step emits a
+    // provenance-tracked Markdown report). A request that omits `report` still
+    // writes the default report (title = goal, timestamped filename) into
+    // `report_output_dir`, so a bare `sandy run` never gathers and drops the
+    // artifact. Gather-only stays file-less only via the plugin's
+    // `sandy.gather`, which does not route through this path.
+    const runRequest =
+      request.report === undefined ? { ...request, report: {} } : request;
     const result = await withSandy(args, (s) => {
       // A template run is a distinct audited fact (AU-01, issue #15).
       if (template !== undefined) s.audit.append("template_run", { template });
-      return s.run(request);
+      return s.run(runRequest);
     }, overrides);
     if (args.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     else process.stdout.write(formatRunText(result, args.auditFile) + "\n");
