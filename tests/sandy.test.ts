@@ -571,7 +571,7 @@ describe("createSandy: engine wiring (PRD §7)", () => {
       start: async () => {},
       isReady: () => false,
       status: () => ({ status: "degraded", error: "model process died" }),
-      record: () => ({ seq: 0, at: "", type: "model_invocation", data: {} }),
+      record: () => ({ session: "", seq: 0, at: "", type: "model_invocation", data: {} }),
       invoke: async () => {
         throw new Error("no");
       },

@@ -1085,6 +1085,31 @@ describe("Audit logging (AU-01/02/03)", () => {
     expect(parsed.map((p) => p.type)).toEqual(["session_start", "mcp_call", "session_end"]);
   });
 
+  it("sessions appending to one JSONL file stay distinguishable: (session, seq) is unique", async () => {
+    // Field-test finding: every invocation appending to the same --audit file
+    // restarted seq at 1, so seq alone was ambiguous across runs.
+    const file = path.join(dir, "shared-audit.log");
+    const first = new JsonlAuditLogger(file);
+    first.append("session_start", { goal: "one" });
+    first.append("session_end", { claims: 0 });
+    await first.close();
+    const second = new JsonlAuditLogger(file);
+    second.append("session_start", { goal: "two" });
+    await second.close();
+
+    const events = (await readFile(file, "utf8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as { session: string; seq: number });
+    expect(events).toHaveLength(3);
+    expect(events.map((e) => e.seq)).toEqual([1, 2, 1]); // seq is per session…
+    expect(events[0]!.session).toBe(events[1]!.session);
+    expect(events[2]!.session).not.toBe(events[0]!.session);
+    expect(events[0]!.session).toMatch(/^[0-9a-f-]{36}$/);
+    const keys = new Set(events.map((e) => `${e.session}:${e.seq}`));
+    expect(keys.size).toBe(3); // …and (session, seq) identifies every event
+  });
+
   it("close() rejects if a JSONL write ever failed during the session", async () => {
     // Make the write fail reliably: put a *file* at the parent path, so the
     // logger's mkdir(path.dirname(filePath)) fails with ENOTDIR. (Permission
