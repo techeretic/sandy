@@ -35,7 +35,7 @@ sandy <verb> [options]
 | `-h, --help` | Show help. |
 | `-V, --version` | Show the version. |
 
-`import` (docs: [IMPORT_DESIGN](../docs/IMPORT_DESIGN.md)) takes a **URL**, a **file**, or `-` (stdin). It fetches (a one-shot, human-confirmed, audited egress dial — the only permitted exception to the zero-egress invariant), validates the content against the **same** fail-closed manifest schema as `mcp-servers.json`, and writes a **content-hash-pinned** staged entry under `.sandy-import/`. It then prints a review package: the entry, the exact `sandbox.allowed_network` lines to add, the env-var names to export (never values), and the per-server allowlist. The read allowlist is **never auto-expanded** — it stays exactly what the manifest declared unless you pass `--tools`. Only `--apply` (or editing the config yourself) promotes a staged entry; `--apply` re-runs the full config load as the final gate and refuses to overwrite existing server names. If that gate refuses, both live files are restored byte-for-byte — a refused apply changes nothing. `--apply` can also add your **first** server: when `sandy.json` is valid but the manifest it points to doesn't exist yet (or is `{"servers": []}`), it is created from the staged entry. v1 is **deterministic-only**: the source must be a machine-readable manifest. Transcribing prose pages (`--auto`) is a documented follow-up — the core carries no LLM client in v1.
+`import` (docs: [IMPORT_DESIGN](../docs/IMPORT_DESIGN.md)) takes a **URL**, a **file**, or `-` (stdin). It fetches (a one-shot, human-confirmed, audited egress dial — the only permitted exception to the zero-egress invariant), validates the content against the **same** fail-closed manifest schema as `mcp-servers.json`, and writes a **content-hash-pinned** staged entry under `.sandy-import/`. It then prints a review package: the entry, the exact `sandbox.allowed_network` lines to add, the env-var names to export (never values), and the per-server allowlist. The read allowlist is **never auto-expanded** — it stays exactly what the manifest declared unless you pass `--tools`. Only `--apply` (or editing the config yourself) promotes a staged entry; `--apply` re-runs the full config load as the final gate and refuses to overwrite existing server names. If that gate refuses, both live files are restored byte-for-byte — a refused apply changes nothing. `--apply` can also add your **first** server: when `sandy.json` is valid but the manifest it points to doesn't exist yet (or is `{"servers": []}`), it is created from the staged entry. v1 is **deterministic-only**: the source must be a machine-readable manifest — Sandy's native `mcp-servers.json` shape, or an **MCP Registry `server.json`** (see below). Transcribing prose pages (`--auto`) is a documented follow-up — the core carries no LLM client in v1.
 
 ## Exit codes (stable contract for CI/callers)
 
@@ -102,6 +102,23 @@ node bin/sandy.js import https://registry.internal/servers/jira.json \
 # → appends the server to mcp-servers.json, adds sandbox.allowed_network
 #   entries, and re-runs the full config load as the final gate.
 ```
+
+#### From an MCP Registry `server.json`
+
+Most published servers describe themselves with a registry [`server.json`](https://github.com/modelcontextprotocol/registry). `import` converts one deterministically, then validates the result with the same schema. Two things the registry format can't answer are asked of you instead of guessed:
+
+- **The tools.** `server.json` doesn't list a server's tools, so `--tools <name>=a,b` is required; the declared tools become both `capabilities` and `allowed_tools`. The server name is the registry name's last segment, kebab-cased (the error message prints it).
+- **Remote vs. package**, when the entry offers both: `--registry-source remote` (a hosted endpoint — every call goes to that third party, through Sandy's `NetworkGuard`) or `--registry-source package` (runs locally as a stdio subprocess; its own egress is bounded by your sandbox).
+
+```bash
+node bin/sandy.js import https://raw.githubusercontent.com/cyanheads/libofcongress-mcp-server/main/server.json \
+  --tools libofcongress-mcp-server=libofcongress_search,libofcongress_get_item \
+  --registry-source package
+# → format: MCP Registry server.json (converted; tools declared by you via --tools)
+#   command: npx -y @cyanheads/libofcongress-mcp-server@0.3.0 …  (exact version pin)
+```
+
+Packages map to `npx -y <id>@<version>` (npm) or `uvx <id>==<version>` (pypi); only **required** environment variables become `${ENV_REF}` entries (optional ones keep the server's defaults). Anything that would need a guess is refused (exit `3`): remote headers (auth), templated URLs, other registries (e.g. OCI) or non-stdio packages, and required arguments with no fixed value — write those entries by hand.
 
 Exit codes follow the stable contract: usage-class errors (bad source, cancelled
 fetch) exit `2`; fail-closed validation/config errors exit `3`. The fetch and the
