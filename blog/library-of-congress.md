@@ -2,6 +2,8 @@
 
 *An exploratory, warts-and-all walkthrough: taking a public MCP server from a marketplace listing to a provenance-tracked report, inside a sandbox on a Mac. What worked, what surprised us, and what we're going to fix.*
 
+> **Update (same day):** all eight findings below have been fixed on `master` (PRs #51–#58, after v0.2.1). The walkthrough is left as it happened; see [the fixes](#update-the-fixes) at the end for what changed and what the same session looks like now.
+
 ---
 
 The [product post](sandy.md) makes Sandy's pitch in the abstract: an assistant that lives inside a boundary it can prove it can't leave, talks only to MCP servers you declare, and writes reports where every claim traces back to a source call. This post tests that pitch on one concrete task, with nothing prepared in advance.
@@ -210,18 +212,44 @@ We also tripped over something here, covered below: if you switch the default fo
 
 **Our issue list from one afternoon:**
 
-| # | Finding | Kind |
-|---|---------|------|
-| 1 | A failed `import` fetch (e.g. HTTP 403) makes a network request but writes **no `import_fetch` audit event**, contrary to `IMPORT_DESIGN.md` ("Fetch failure — clean error, nothing staged, audit event recorded"). | Bug (audit gap) |
-| 2 | With a binary `default_report_format`, a request whose `report.file` ends in `.md` fails with `format-invalid`. The CLI prints no report line and no error, and exits `0`. The error appears only in the audit log and in `--json` `reportError`. | Bug (silent failure) |
-| 3 | Markdown footnotes don't pair up. Single-line claims get a reference (`[^1]`) with no definition, and multi-line claims get a definition with no reference. With real MCP output (nearly always multi-line), GitHub's renderer shows neither as links. The Provenance table still carries traceability. | Bug (rendering) |
-| 4 | `sandbox.runtime: "macos-sandbox-exec"` is accepted by the schema but never detected, so it always exits `4`. Use `custom` for now. | Gap |
-| 5 | `import --apply` can't bootstrap the first server into a missing or empty `mcp-servers.json`. | UX |
-| 6 | No deterministic converter from MCP Registry `server.json` to Sandy's manifest yet. | Feature |
-| 7 | The `DEGRADED` message for `custom` says "refusing to continue" but continues. | Wording |
-| 8 | Audit `seq` restarts at 1 on every invocation that appends to the same JSONL file, so `seq` alone isn't a global order. | Nit |
+| # | Finding | Kind | Fixed in |
+|---|---------|------|----------|
+| 1 | A failed `import` fetch (e.g. HTTP 403) makes a network request but writes **no `import_fetch` audit event**, contrary to `IMPORT_DESIGN.md` ("Fetch failure — clean error, nothing staged, audit event recorded"). | Bug (audit gap) | [#51](https://github.com/techeretic/sandy/pull/51) |
+| 2 | With a binary `default_report_format`, a request whose `report.file` ends in `.md` fails with `format-invalid`. The CLI prints no report line and no error, and exits `0`. The error appears only in the audit log and in `--json` `reportError`. | Bug (silent failure) | [#52](https://github.com/techeretic/sandy/pull/52) |
+| 3 | Markdown footnotes don't pair up. Single-line claims get a reference (`[^1]`) with no definition, and multi-line claims get a definition with no reference. With real MCP output (nearly always multi-line), GitHub's renderer shows neither as links. The Provenance table still carries traceability. | Bug (rendering) | [#53](https://github.com/techeretic/sandy/pull/53) |
+| 4 | `sandbox.runtime: "macos-sandbox-exec"` is accepted by the schema but never detected, so it always exits `4`. Use `custom` for now. | Gap | [#54](https://github.com/techeretic/sandy/pull/54) |
+| 5 | `import --apply` can't bootstrap the first server into a missing or empty `mcp-servers.json`. | UX | [#55](https://github.com/techeretic/sandy/pull/55) |
+| 6 | No deterministic converter from MCP Registry `server.json` to Sandy's manifest yet. | Feature | [#56](https://github.com/techeretic/sandy/pull/56) |
+| 7 | The `DEGRADED` message for `custom` says "refusing to continue" but continues. | Wording | [#57](https://github.com/techeretic/sandy/pull/57) |
+| 8 | Audit `seq` restarts at 1 on every invocation that appends to the same JSONL file, so `seq` alone isn't a global order. | Nit | [#58](https://github.com/techeretic/sandy/pull/58) |
 
-None of these weakens the security story: no bypass, no undeclared egress, no fabrication. Two of them (#1 and #2) do weaken the *forensic* and *operator-feedback* story, and those are the ones we'll fix first.
+None of these weakens the security story: no bypass, no undeclared egress, no fabrication. Two of them (#1 and #2) did weaken the *forensic* and *operator-feedback* story. All eight are now fixed; see the update below.
+
+## Update: the fixes
+
+One PR per finding, each with regression tests, merged the same day:
+
+1. **A failed import fetch is audited.** `import_fetch` now carries `outcome: "ok"` or `outcome: "error"` with the error, so the 403 from the marketplace leaves a trace like any other dial.
+2. **No more silent report failures.** A `report.file` that the configured format can't be written under (`.md` with `pdf`) is refused **before any MCP call** with exit `2`. Any other write failure prints `report: NOT WRITTEN — <reason>` and exits `1`.
+3. **Footnotes link.** Each claim gets exactly one reference, and each reference has exactly one definition (server/tool, args hash, timestamp). Rendered through GitHub's Markdown API, all six footnotes from the report above are now live links.
+4. **`macos-sandbox-exec` is detected.** The kernel won't let a process that's already under a restrictive Seatbelt profile apply a second sandbox, so Sandy runs a no-op nested `sandbox-exec` and treats `sandbox_apply: Operation not permitted` as the evidence. Under our profile, `sandy check` now says `sandbox: macos-sandbox-exec (declared: macos-sandbox-exec)` and `RESULT: OK`. A profile that denies nothing isn't detected, and that's the honest answer. The runtimes that still can't be detected (`systemd-nspawn`, `chroot`, `windows-appcontainer`) now get an error message pointing at `custom`.
+5. **`--apply` bootstraps the first server** when `sandy.json` is valid but its manifest is missing or empty. A refused apply now restores both files byte-for-byte; before, it exited 3 but left the half-merged config on disk.
+6. **`import` reads MCP Registry `server.json`.** The file that was rejected in Step 1 now imports. The registry format lists no tools and can offer both a hosted endpoint and a package, so Sandy asks instead of guessing: `--tools` is required, and so is `--registry-source` when both are present.
+7. **`custom` says what's true:** "continuing under the declared custom boundary, which the operator manages — Sandy cannot verify it". It's still `DEGRADED`, and still audited.
+8. **Every audit event carries a `session` id**, so `(session, seq)` identifies an event even when many runs share one JSONL file. We didn't continue `seq` from the file's tail, because that would race when two processes append at once.
+
+The Step 1 dead end is now one command:
+
+```bash
+$ sandy import https://raw.githubusercontent.com/cyanheads/libofcongress-mcp-server/main/server.json \
+    --tools libofcongress-mcp-server=libofcongress_search,libofcongress_get_item,… \
+    --registry-source package --apply
+  format:  MCP Registry server.json (converted; tools declared by you via --tools)
+  applied: yes (live config updated + re-validated)
+# → command: npx -y @cyanheads/libofcongress-mcp-server@0.3.0 run start:stdio   (exact version pin)
+```
+
+One caveat from trying it: the converted entry runs `npx`, which needs to write its package cache. Under our Seatbelt profile, which only allows writes to the workspace, the server fails to start with `startup failure (terminal)`, reported rather than hidden. You can either allow the npm cache directory in the profile, or do what we did above: install the pinned package locally and point `command` at it. The registry path gives you a reviewed, pinned entry quickly. How much the boundary lets that entry do is still your call.
 
 ## Try it yourself
 
