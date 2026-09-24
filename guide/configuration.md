@@ -35,7 +35,7 @@ A complete annotated example is in [`config/sandy.json`](../config/sandy.json) a
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `runtime` | enum | yes | The boundary you're running in: `docker`, `firejail`, `wsl`, `gvisor`, `k8s-pod`, `systemd-nspawn`, `chroot`, `macos-sandbox-exec`, `windows-appcontainer`, or `custom`. |
+| `runtime` | enum | yes | The boundary you're running in: `docker`, `firejail`, `wsl`, `gvisor`, `k8s-pod`, `systemd-nspawn`, `chroot`, `macos-sandbox-exec`, `windows-appcontainer`, or `custom`. Auto-detected: `docker`/`k8s-pod`, `firejail`, `wsl`, `gvisor`, `macos-sandbox-exec`. `systemd-nspawn`, `chroot`, and `windows-appcontainer` can't be detected yet — use `custom`. |
 | `allowed_paths` | absolute path[] | yes (≥1) | Your **working roots** — the only files Sandy may touch. Must be absolute, no `..`. |
 | `allowed_network` | `host:port`[] | no (default `[]`) | The **only** network endpoints Sandy may reach at runtime. Default empty = no egress at all. (The `sandy import` one-shot fetch is the sole audited exception — see [the import flow](#the-import-flow-sandy-import).) |
 | `max_memory_mb` | int > 0 | yes | Memory budget (bytes to the cgroup ceiling / in-service bound). |

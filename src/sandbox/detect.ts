@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import os from "node:os";
 
@@ -6,6 +7,13 @@ export interface DetectionContext {
   /** Injected for tests. */
   fileExists: (path: string) => boolean;
   readFileSync: (path: string) => string;
+  /** `process.platform`; the macOS Seatbelt probe runs only on "darwin". */
+  platform?: string;
+  /**
+   * macOS only: is a Seatbelt (`sandbox-exec`) profile in force? Injected for
+   * tests; the default is {@link probeSeatbelt}.
+   */
+  seatbeltProbe?: () => boolean;
 }
 
 export type DetectedRuntime =
@@ -20,6 +28,13 @@ export type DetectedRuntime =
   | "windows-appcontainer"
   | "none";
 
+/**
+ * Runtimes the config schema accepts but no detector recognizes yet. A config
+ * declaring one can never match a detection, so it is refused at startup with
+ * a pointer to `custom` (the operator-managed boundary) instead.
+ */
+export const UNDETECTABLE_RUNTIMES: readonly string[] = ["systemd-nspawn", "chroot", "windows-appcontainer"];
+
 export interface RuntimeDetection {
   runtime: DetectedRuntime;
   /** Evidence for the detection, for the startup report. */
@@ -30,7 +45,31 @@ const defaultContext = (): DetectionContext => ({
   env: process.env,
   fileExists: existsSync,
   readFileSync: (p) => readFileSync(p, "utf8"),
+  platform: process.platform,
+  seatbeltProbe: probeSeatbelt,
 });
+
+const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
+
+/**
+ * Probe for a macOS Seatbelt boundary. The kernel refuses to apply a sandbox
+ * to a process that is already running under a restrictive one, so a child
+ * `sandbox-exec` with a no-op profile fails with `sandbox_apply: Operation
+ * not permitted` exactly when a profile with at least one deny rule is in
+ * force. (A profile that denies nothing lets the nested apply through — and
+ * is no boundary, so reporting "none" for it is the honest answer.) Evidence
+ * must match both the exit code and the message; anything else — including
+ * a missing `sandbox-exec` — is "not detected", which fails closed.
+ */
+export function probeSeatbelt(): boolean {
+  if (!existsSync(SANDBOX_EXEC)) return false;
+  const res = spawnSync(SANDBOX_EXEC, ["-p", "(version 1)(allow default)", "/usr/bin/true"], {
+    encoding: "utf8",
+    timeout: 5_000,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  return res.status !== 0 && /sandbox_apply: Operation not permitted/.test(res.stderr ?? "");
+}
 
 function inWslKernel(ctx: DetectionContext): boolean {
   const release = ctx.env["WSL_DISTRO_NAME"] !== undefined;
@@ -107,6 +146,9 @@ export function detectRuntime(ctx: DetectionContext = defaultContext()): Runtime
     return { runtime: "docker", evidence: ["container indicators"] };
   }
   if (inWslKernel(ctx)) return { runtime: "wsl", evidence: ["Microsoft WSL kernel signature"] };
+  if (ctx.platform === "darwin" && ctx.seatbeltProbe?.() === true) {
+    return { runtime: "macos-sandbox-exec", evidence: ["nested sandbox_apply refused: a Seatbelt profile is in force"] };
+  }
   return { runtime: "none", evidence: [] };
 }
 

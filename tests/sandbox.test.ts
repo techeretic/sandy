@@ -97,6 +97,26 @@ describe("detectRuntime", () => {
   it("detects none on a plain host", () => {
     expect(detectRuntime(ctx({})).runtime).toBe("none");
   });
+
+  it("detects macos-sandbox-exec when the Seatbelt probe fires on darwin", () => {
+    const d = detectRuntime(ctx({ platform: "darwin", seatbeltProbe: () => true }));
+    expect(d.runtime).toBe("macos-sandbox-exec");
+    expect(d.evidence.join(" ")).toMatch(/Seatbelt/);
+  });
+
+  it("reports none on darwin when no Seatbelt profile is in force", () => {
+    expect(detectRuntime(ctx({ platform: "darwin", seatbeltProbe: () => false })).runtime).toBe("none");
+  });
+
+  it("never runs the Seatbelt probe off darwin", () => {
+    let called = false;
+    const probe = () => {
+      called = true;
+      return true;
+    };
+    expect(detectRuntime(ctx({ platform: "linux", seatbeltProbe: probe })).runtime).toBe("none");
+    expect(called).toBe(false);
+  });
 });
 
 describe("PathConfinement", () => {
@@ -286,6 +306,29 @@ describe("SandboxEnforcer", () => {
     }).catch((e) => e);
     expect(err).toBeInstanceOf(SandboxViolationError);
     expect((err as Error).message).toContain('declares sandbox runtime "firejail"');
+  });
+
+  it("matches a macos-sandbox-exec declaration to its detection", async () => {
+    const enforcer = await SandboxEnforcer.create(sandboxConfig({ runtime: "macos-sandbox-exec" }), mcpManifest, {
+      detection: detect("macos-sandbox-exec"),
+    });
+    expect(enforcer.detection.runtime).toBe("macos-sandbox-exec");
+  });
+
+  it("points an undetectable declared runtime at `custom`", async () => {
+    const err = await SandboxEnforcer.create(sandboxConfig({ runtime: "chroot" }), mcpManifest, {
+      detection: detect("none"),
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(SandboxViolationError);
+    expect((err as Error).message).toMatch(/cannot detect "chroot" yet.*"custom"/);
+  });
+
+  it("tells a macos-sandbox-exec declaration without a profile how to start", async () => {
+    const err = await SandboxEnforcer.create(sandboxConfig({ runtime: "macos-sandbox-exec" }), mcpManifest, {
+      detection: detect("none"),
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(SandboxViolationError);
+    expect((err as Error).message).toMatch(/sandbox-exec -f <profile>/);
   });
 
   it("accepts a k8s pod for a docker declaration", async () => {
