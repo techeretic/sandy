@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile, readFile as fsRead } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, readFile as fsRead, readdir } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -859,6 +859,33 @@ describe("runCli: verbs + exit codes (real stdio MCP server)", () => {
     expect(value).toBe(EXIT.ok);
     const report = await fsRead(path.join(ws, "reports", "deals.md"), "utf8");
     expect(report).toContain("# Deals");
+    expect(report).toContain("2 deals closed in emea");
+  });
+
+  it("run <request-without-report> still writes a default report to report_output_dir", async () => {
+    // The reported gap: a model-less `run` whose request omits `report` gathered
+    // + printed the report but wrote NO file. `run` is a report-producing verb, so
+    // the default report (title = goal, timestamped name) must always land in the
+    // configured dir — never silently dropped.
+    const ws = await tmpWorkspace();
+    const file = path.join(ws, "no-report.json");
+    await writeFile(
+      file,
+      JSON.stringify({
+        goal: "deals",
+        gather: [{ id: "deals", server: "crm", tool: "read_deals", args: { region: "emea" } }],
+      }),
+    );
+    const cfg = await writeConfig(ws, { allowedPaths: [ws], crmCommand: stdioCommand });
+    const { value } = await captureStdout(() =>
+      runCli(["run", file, "--config", cfg, "--no-progress", "--json"], cliOverrides),
+    );
+    expect(value).toBe(EXIT.ok);
+    const files = await readdir(path.join(ws, "reports"));
+    const md = files.filter((f) => f.endsWith(".md"));
+    expect(md.length).toBe(1);
+    const report = await fsRead(path.join(ws, "reports", md[0]!), "utf8");
+    expect(report).toContain("# deals"); // default title = goal
     expect(report).toContain("2 deals closed in emea");
   });
 

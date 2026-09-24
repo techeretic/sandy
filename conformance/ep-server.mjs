@@ -81,7 +81,12 @@ const httpServer = createServer((req, res) => {
   }
 });
 
+// Bind on all interfaces (0.0.0.0) so the endpoint is reachable cross-container
+// in the Docker network-level harness (reached by the EP container's IP). But
+// *advertise* the loopback URL: the in-process harness dials exactly this printed
+// address, and 0.0.0.0 is not a dialable destination on Linux (it only works as a
+// bind wildcard). Printing 127.0.0.1 keeps both harnesses working.
 await new Promise((resolve) => httpServer.listen(port, "0.0.0.0", resolve));
 const actual = httpServer.address().port;
-process.stdout.write(`http://0.0.0.0:${actual}/mcp\n`);
+process.stdout.write(`http://127.0.0.1:${actual}/mcp\n`);
 // Keep the process alive until killed; readiness is signaled via stdout above.

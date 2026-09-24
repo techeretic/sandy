@@ -62,7 +62,7 @@ export const IMPORT_DEFAULTS: ImportFetchOptions = {
   maxRedirects: 3,
 };
 
-/** The single default staging location, relative to the working directory. */
+/** The single default staging location, relative to the config directory (not the cwd). */
 export const DEFAULT_STAGE_DIR = ".sandy-import";
 
 export interface StagedImport {
@@ -99,7 +99,11 @@ export interface ImportResult {
 export interface ImportOptions {
   /** Path to `sandy.json` (needed for `--apply`; staging is config-free). */
   configPath?: string;
-  /** Staging directory (default: `./.sandy-import`). */
+  /**
+   * Staging directory. An explicit value is used verbatim (relative to the
+   * cwd). When omitted, the default is `.sandy-import` inside the CONFIG
+   * directory (mirroring `report_output_dir`), not the cwd.
+   */
   stageDir?: string;
   /** Audit logger to record `import_fetch` / `import_staged` events. */
   audit?: AuditLogger;
@@ -372,7 +376,20 @@ async function stage(
 ): Promise<StagedImport> {
   const hash = sha256Hex(text);
   const fetchedAt = (opts.now ?? (() => new Date()))().toISOString();
-  const stageDir = path.resolve(opts.stageDir ?? DEFAULT_STAGE_DIR);
+  // The DEFAULT staging dir anchors to the config dir (not the process cwd),
+  // mirroring how `report_output_dir` resolves (config/loader.ts): staging a
+  // config is a property of that config, so a run from any directory lands its
+  // `.sandy-import/` next to `sandy.json` rather than leaving a stray dir in cwd.
+  // An EXPLICIT `stageDir` override is honored verbatim (cwd-relative if given
+  // as a relative path). This is computed from the *declared* config path
+  // (opts.configPath ?? $SANDY_CONFIG ?? "sandy.json") — it needs no config to
+  // be loadable, preserving the config-free staging path.
+  const configPath = opts.configPath ?? process.env["SANDY_CONFIG"] ?? "sandy.json";
+  const configDir = path.dirname(path.resolve(configPath));
+  const stageDir =
+    opts.stageDir !== undefined
+      ? path.resolve(opts.stageDir)
+      : path.resolve(configDir, DEFAULT_STAGE_DIR);
   const stagedPath = path.join(stageDir, `${hash}.json`);
   const content: StagedFileContent = {
     source: { url: source, sha256: hash, fetchedAt },
