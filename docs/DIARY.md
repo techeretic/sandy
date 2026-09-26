@@ -588,4 +588,4 @@ Cut **v0.3.0** — a **minor** bump: on top of fixes it adds capability (MCP Reg
 - **Version bump 0.2.1 → 0.3.0** in `package.json`, `package-lock.json` (top + root package only), `plugin/.claude-plugin/plugin.json`, and the two runtime identity strings (`src/plugin/mcp-server.ts`, `src/mcp/managed-server.ts`).
 - **What's in it:** PRs #51–#58 (the Seatbelt field-test findings) and #60 (the review + Linux re-verification above), plus docs (README Status, `docs/NEXT_STEPS.md`, `guide/security.md` detection note, test counts).
 - **Verification:** typecheck + build green; **387/387 tests**; CI (core + Docker/Firejail `boundary × mode` matrix + identity) green.
-- **Security:** the Docker-host detection fix closes a fail-open on Linux hosts running containers (affects ≤ v0.2.1); called out in the release notes.
+- **Security:** the Docker-host detection fix closes a fail-open on Linux hosts running containers (affects ≤ v0.2.1); called out in the release notes and published as advisory **GHSA-vrfr-983g-7848** (high, CWE-693, patched in 0.3.0).
