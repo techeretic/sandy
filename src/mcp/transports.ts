@@ -59,6 +59,21 @@ function authHeaders(server: McpServer, resolver: SecretResolver): Record<string
   );
 }
 
+const STDERR_TAIL_CHARS = 2048;
+const stderrTails = new WeakMap<Transport, () => string>();
+
+/**
+ * The last few lines a stdio server wrote to stderr, folded onto one line, or
+ * undefined (not a stdio transport, or nothing written).
+ */
+export function stderrTail(transport: Transport, maxLines = 5): string | undefined {
+  const lines = (stderrTails.get(transport)?.() ?? "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  return lines.length > 0 ? lines.slice(-maxLines).join(" | ") : undefined;
+}
+
 /**
  * Build the transport for a configured server (MCP-02/05).
  *
@@ -77,12 +92,21 @@ export function createTransport(
     for (const [key, ref] of Object.entries(server.env ?? {})) {
       env[key] = resolver.resolve(ref);
     }
-    return new StdioClientTransport({
+    const transport = new StdioClientTransport({
       command: command as string,
       args,
       env,
       stderr: "pipe",
     });
+    // Drain the child's stderr: an unread pipe fills (~64 KB) and blocks a
+    // chatty server mid-write. Keep only a bounded tail, so a server that dies
+    // at startup can say why (see `stderrTail`).
+    let tail = "";
+    transport.stderr?.on("data", (chunk: Buffer | string) => {
+      tail = (tail + chunk.toString()).slice(-STDERR_TAIL_CHARS);
+    });
+    stderrTails.set(transport, () => tail);
+    return transport;
   }
 
   const headers = authHeaders(server, resolver);

@@ -1,5 +1,6 @@
 import type { JSONRPCMessage, MessageExtraInfo } from "@modelcontextprotocol/sdk/types.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   McpClientManager,
@@ -394,4 +395,46 @@ describe("createTransport auth fail-closed (GHSA-38wj-6mjh-2jf9)", () => {
     const guard = new NetworkGuard(["internal.example.com"]);
     expect(() => createTransport(server, resolver, guard)).toThrow(/auth\.type "mtls" is not yet implemented/);
   });
+});
+
+describe("stdio server stderr", () => {
+  const fixture = new URL("./fixtures/stdio-mcp-server.mjs", import.meta.url).href;
+
+  it("a server that dies at startup reports its own stderr, not just 'Connection closed'", async () => {
+    const script = "console.error('npm error enoent'); console.error(\"ENOENT: mkdir '/home/node/.npm'\"); process.exit(1)";
+    const manager = new McpClientManager(
+      [serverConfig("dies", ["read_deals"], { command: ["node", "-e", script] })],
+      resolver,
+      new NetworkGuard([]),
+      { retry: instantRetry },
+    );
+    try {
+      await manager.connectAll();
+      const failed = manager.failedServers;
+      expect(failed).toHaveLength(1);
+      expect(failed[0]?.error).toContain("server stderr: npm error enoent | ENOENT: mkdir '/home/node/.npm'");
+    } finally {
+      await manager.close();
+    }
+  });
+
+  it("drains a chatty server's stderr, so a full pipe cannot block its startup", async () => {
+    // 1 MiB to stderr before serving, with a blocking write (a non-Node
+    // server — Python, Go — writes stderr synchronously): an undrained pipe
+    // (~64 KiB) blocks it forever and it never answers `initialize`.
+    const script = `head -c 1048576 /dev/zero >&2; exec node '${fileURLToPath(fixture)}'`;
+    const manager = new McpClientManager(
+      [serverConfig("chatty", ["read_deals"], { command: ["sh", "-c", script] })],
+      resolver,
+      new NetworkGuard([]),
+      { retry: instantRetry },
+    );
+    try {
+      await manager.connectAll();
+      expect(manager.failedServers).toEqual([]);
+      expect(manager.connectedNames).toEqual(["chatty"]);
+    } finally {
+      await manager.close();
+    }
+  }, 15_000);
 });
