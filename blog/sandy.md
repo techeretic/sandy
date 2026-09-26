@@ -72,7 +72,7 @@ Yes — and that's the point. Sandy ships a **conformance suite** that doesn't j
 
 You don't take Sandy's word for "no egress." You run `npm run conformance` and watch it prove it.
 
-And it's been **reviewed and hardened**: a full-repo security review closed 7 findings (shipped as private advisories), followed by a dozen more fix PRs. 349 tests, typecheck and build green. Apache-2.0 licensed, with a minimal, auditable dependency set — the binary report containers are hand-rolled on purpose, to keep the install clean.
+And it's been **reviewed and hardened**: a full-repo security review closed 7 findings (shipped as private advisories), followed by a dozen more fix PRs. 387 tests, typecheck and build green. Apache-2.0 licensed, with a minimal, auditable dependency set — the binary report containers are hand-rolled on purpose, to keep the install clean.
 
 ## Try it
 
