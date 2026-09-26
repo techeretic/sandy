@@ -418,6 +418,27 @@ describe("stdio server stderr", () => {
     }
   });
 
+  it("prefers the error line over the stack trace that follows it", async () => {
+    const script =
+      "console.error(\"Error: Cannot find module '/srv/missing.js'\");" +
+      "for (let i = 0; i < 8; i++) console.error('    at frame' + i + ' (node:internal/x:1:1)');" +
+      "process.exit(1)";
+    const manager = new McpClientManager(
+      [serverConfig("missing", ["read_deals"], { command: ["node", "-e", script] })],
+      resolver,
+      new NetworkGuard([]),
+      { retry: instantRetry },
+    );
+    try {
+      await manager.connectAll();
+      const error = manager.failedServers[0]?.error ?? "";
+      expect(error).toContain("server stderr: Error: Cannot find module '/srv/missing.js'");
+      expect(error).not.toContain("frame7");
+    } finally {
+      await manager.close();
+    }
+  });
+
   it("drains a chatty server's stderr, so a full pipe cannot block its startup", async () => {
     // 1 MiB to stderr before serving, with a blocking write (a non-Node
     // server — Python, Go — writes stderr synchronously): an undrained pipe
