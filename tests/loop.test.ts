@@ -430,6 +430,26 @@ describe("AutonomousLoop (Phase 2, design §2.1)", () => {
     }
   });
 
+  it("a model-proposed report filename the configured format can't use is dropped for the default name", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeConfig(ws, [ws], { default_report_format: "pdf" });
+    const transport = await crmServer();
+    const plan = JSON.stringify({ ...JSON.parse(PLAN_OK), report: { title: "EMEA Deals", file: "emea.md" } });
+    const engine = new ScriptedEngine([{ completion: plan }, { completion: NARRATIVE }], new InMemoryAuditLogger());
+    const sandy = await createSandy({ sandyPath: cfg, transportFactory: transport, detection: pinnedDetection, engine });
+    try {
+      (engine as unknown as { audit: AuditLogger }).audit = sandy.audit;
+      const r = await sandy.ask("Summarize EMEA deals");
+      expect(r.reportError).toBeUndefined();
+      expect(r.request?.report?.file).toBeUndefined();
+      expect(r.reportPath).toMatch(/\.pdf$/);
+      const onDisk = await fsRead(r.reportPath!);
+      expect(onDisk.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+    } finally {
+      await closeAll([sandy]);
+    }
+  });
+
   it("narrative:false skips narrating entirely (one model call)", async () => {
     const ws = await tmpWorkspace();
     const cfg = await writeConfig(ws, [ws]);
@@ -609,6 +629,110 @@ describe("AutonomousLoop: multi-round planning (issue #19)", () => {
       expect(replanEvents.length).toBeGreaterThan(0);
       expect(replanEvents.some((e) => (e.data as Record<string, unknown>)["outcome"] === "gathered")).toBe(true);
       expect(replanEvents.some((e) => (e.data as Record<string, unknown>)["outcome"] === "consolidated")).toBe(true);
+    } finally {
+      await closeAll([sandy]);
+    }
+  });
+
+  it("a failed consolidation re-write is a reportError, and a failed narrate re-write does not crash the ask", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeMultiConfig(ws, [ws]);
+    const transport = await crmServer2();
+    const engine = new ScriptedEngine(
+      [
+        { completion: PLAN_DEALS },
+        { completion: REPLAN_CONTACTS },
+        { completion: REPLAN_STOP },
+        { completion: NARRATIVE },
+      ],
+      new InMemoryAuditLogger(),
+    );
+    const sandy = await createSandy({ sandyPath: cfg, transportFactory: transport, detection: pinnedDetection, engine });
+    try {
+      (engine as unknown as { audit: AuditLogger }).audit = sandy.audit;
+      // Round 1's report goes through the orchestrator's own writer; only the
+      // loop's re-writes (consolidate, narrate) see this failing file manager.
+      const diskFull = async (): Promise<never> => {
+        throw new Error("disk full");
+      };
+      const files = Object.create(sandy.files, { write: { value: diskFull }, writeBinary: { value: diskFull } });
+      const loop = new AutonomousLoop({
+        engine,
+        orchestrator: sandy.orchestrator,
+        audit: sandy.audit,
+        files,
+        reportDir: sandy.loaded.reportOutputDir,
+        reportFormat: sandy.loaded.reportFormat,
+        tools: [
+          { server: "crm", tool: "read_deals" },
+          { server: "crm", tool: "read_contacts" },
+        ],
+        maxPlanningRounds: 3,
+      });
+      const r = await loop.run("Summarize EMEA");
+
+      expect(r.claims).toHaveLength(2);
+      expect(r.reportPath).toBeTruthy();
+      expect(r.reportError).toMatch(/consolidated report not written .*round 1 only.*disk full/);
+      // The file on disk is round 1's report: it lacks round 2's claims.
+      const onDisk = await fsRead(r.reportPath!, "utf8");
+      expect(onDisk).not.toContain("contacts");
+      // The narrate re-write failed too: degraded (no narrative), audited, not thrown.
+      expect(r.narrative).toBeUndefined();
+      const narrate = sandy.audit.events().find((e) => e.type === "standalone_narrate")!;
+      expect(narrate.data).toMatchObject({ outcome: "error", stage: "write", error: "disk full" });
+    } finally {
+      await closeAll([sandy]);
+    }
+  });
+
+  it("a narrated re-write repairs a failed consolidation: no reportError", async () => {
+    const ws = await tmpWorkspace();
+    const cfg = await writeMultiConfig(ws, [ws]);
+    const transport = await crmServer2();
+    const engine = new ScriptedEngine(
+      [
+        { completion: PLAN_DEALS },
+        { completion: REPLAN_CONTACTS },
+        { completion: REPLAN_STOP },
+        { completion: NARRATIVE },
+      ],
+      new InMemoryAuditLogger(),
+    );
+    const sandy = await createSandy({ sandyPath: cfg, transportFactory: transport, detection: pinnedDetection, engine });
+    try {
+      (engine as unknown as { audit: AuditLogger }).audit = sandy.audit;
+      // Only the first loop re-write (the consolidation) fails.
+      let calls = 0;
+      const files = Object.create(sandy.files, {
+        write: {
+          value: (p: string, c: string, o: { confirmed: boolean }) => {
+            calls += 1;
+            if (calls === 1) return Promise.reject(new Error("transient"));
+            return sandy.files.write(p, c, o);
+          },
+        },
+      });
+      const loop = new AutonomousLoop({
+        engine,
+        orchestrator: sandy.orchestrator,
+        audit: sandy.audit,
+        files,
+        reportDir: sandy.loaded.reportOutputDir,
+        reportFormat: sandy.loaded.reportFormat,
+        tools: [
+          { server: "crm", tool: "read_deals" },
+          { server: "crm", tool: "read_contacts" },
+        ],
+        maxPlanningRounds: 3,
+      });
+      const r = await loop.run("Summarize EMEA");
+
+      expect(r.reportError).toBeUndefined();
+      expect(r.narrative?.text).toBe(NARRATIVE);
+      const onDisk = await fsRead(r.reportPath!, "utf8");
+      expect(onDisk).toContain("contacts");
+      expect(onDisk).toContain(NARRATIVE);
     } finally {
       await closeAll([sandy]);
     }

@@ -573,7 +573,7 @@ async function runServe(args: ParsedArgs, overrides: Partial<SandyDeps> = {}): P
   return EXIT.ok;
 }
 
-function formatImportText(r: ImportResult, auditFile?: string): string {
+function formatImportText(r: ImportResult, auditFile?: string, toolsGiven = false): string {
   const lines: string[] = [];
   lines.push("Sandy import");
   lines.push(`  source:  ${r.source}`);
@@ -594,7 +594,11 @@ function formatImportText(r: ImportResult, auditFile?: string): string {
     lines.push(`  export env vars (names only, values never staged):`);
     for (const name of r.review.envNames) lines.push(`    export ${name}="..."`);
   }
-  lines.push(`  allowlist: confirm the tools above, or re-run with --tools <server=a,b>`);
+  lines.push(
+    toolsGiven
+      ? `  allowlist: as set by --tools`
+      : `  allowlist: confirm the tools above, or re-run with --tools <server=a,b>`,
+  );
   lines.push(`  applied: ${r.applied ? "yes (live config updated + re-validated)" : "no — review the staged file, then re-run with --apply (or edit config yourself)"}`);
   lines.push(`  audit:   ${auditFile ?? "in-memory (use --audit <path> to persist)"}`);
   return lines.join("\n");
@@ -678,7 +682,7 @@ export async function runCli(argv: string[], overrides: Partial<SandyDeps> = {})
         await audit.close();
       }
       if (args.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      else process.stdout.write(formatImportText(result, args.auditFile) + "\n");
+      else process.stdout.write(formatImportText(result, args.auditFile, args.importTools !== undefined) + "\n");
       return EXIT.ok;
     }
     if (args.verb === "serve") {

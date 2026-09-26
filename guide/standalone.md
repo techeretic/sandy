@@ -100,7 +100,7 @@ By default the loop is a single gather→report pass (`preferences.max_planning_
 - it can `stop` (the data suffices), or
 - propose **additional** gather tasks that pass the **same** schema + legal-tool-catalog gate as round 1 — legality can never loosen in a later round.
 
-A re-plan that only re-proposes a call already made (same server + tool + canonicalized args) is treated as "nothing new" and ends the loop — no re-gathering churn. On exhaustion (a dead model / no legal follow-up) the rounds gathered so far stand — reported, never a crash. All rounds consolidate into **one** re-rendered report (claim refs renumbered, provenance untouched), and the narrate covers the whole. Each re-plan is audited (`standalone_replan`) and streams `replan-*` progress events.
+A re-plan that only re-proposes a call already made (same server + tool + canonicalized args) is treated as "nothing new" and ends the loop — no re-gathering churn. On exhaustion (a dead model / no legal follow-up) the rounds gathered so far stand — reported, never a crash. All rounds consolidate into **one** re-rendered report (claim refs renumbered, provenance untouched), and the narrate covers the whole. If re-writing the consolidated report fails (and a later narrate re-write does not repair it), the file still holds round 1 only, so `ask` reports `report: NOT WRITTEN` and exits `1` rather than passing a partial report off as complete. Each re-plan is audited (`standalone_replan`) and streams `replan-*` progress events.
 
 ## `sandy serve` — the loopback-only service
 

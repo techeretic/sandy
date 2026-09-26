@@ -106,6 +106,17 @@ function inFirejail(ctx: DetectionContext): boolean {
   );
 }
 
+/**
+ * The mountinfo line for the mount at `/` (field 5 is the mount point). When
+ * `/` is mounted more than once, the last line is the one in effect.
+ */
+export function rootMountLine(mountinfo: string): string | undefined {
+  return mountinfo
+    .split("\n")
+    .filter((line) => line.split(" ")[4] === "/")
+    .pop();
+}
+
 function inDocker(ctx: DetectionContext): boolean {
   const evidence: string[] = [];
   if (ctx.fileExists("/.dockerenv")) evidence.push("/.dockerenv present");
@@ -121,8 +132,12 @@ function inDocker(ctx: DetectionContext): boolean {
     // not readable; keep checking
   }
   try {
-    const mountinfo = ctx.readFileSync("/proc/self/mountinfo");
-    if (/docker|containerd/.test(mountinfo)) {
+    // Only this process's ROOT mount says whether it runs in a container. A
+    // Docker *host* lists every running container's overlay rootfs
+    // (/var/lib/docker/…, containerd snapshots) in its own mountinfo, so a
+    // match anywhere in the file would call a bare host "docker" (fail-open).
+    const rootMount = rootMountLine(ctx.readFileSync("/proc/self/mountinfo"));
+    if (rootMount !== undefined && /docker|containerd/.test(rootMount)) {
       evidence.push("/proc/self/mountinfo matches container runtime");
       return true;
     }

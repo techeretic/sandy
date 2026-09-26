@@ -17,6 +17,7 @@ import {
 import { validateRequest, type ToolRef } from "../orchestrator/templates.js";
 import {
   isBinaryReportFormat,
+  reportFileFormatMismatch,
   renderReport,
   renderReportArtifact,
   type ReportFormat,
@@ -329,6 +330,7 @@ export class AutonomousLoop {
     let reportPath = first.reportPath;
     let reportContent = first.reportContent;
     let reportArtifactB64 = first.reportArtifactB64;
+    let reportError = first.reportError;
     // Every call the loop has already made — the model may never re-propose one
     // (a "plan" that only re-gathers known calls is nothing new, not a round).
     const knownCalls = new Set(request.gather.map((t) => callSignature(t.server, t.tool, t.args)));
@@ -439,6 +441,9 @@ export class AutonomousLoop {
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err);
           this.audit.append("standalone_replan", { round: rounds, outcome: "consolidate-error", error });
+          // The file on disk still holds round 1 only while the result carries
+          // every round: that is a report that was not written, not a success.
+          reportError = `consolidated report not written (${consolidatedPath} holds round 1 only): ${error}`;
         }
       }
     }
@@ -455,7 +460,7 @@ export class AutonomousLoop {
       reportPath,
       reportContent,
       reportArtifactB64,
-      ...(first.reportError !== undefined ? { reportError: first.reportError } : {}),
+      ...(reportError !== undefined ? { reportError } : {}),
       transcript: first.transcript,
       plan,
       request,
@@ -479,6 +484,10 @@ export class AutonomousLoop {
         loopResult.narrative = narrated.narrative;
         if (narrated.content !== undefined) loopResult.reportContent = narrated.content;
         if (narrated.artifactB64 !== undefined) loopResult.reportArtifactB64 = narrated.artifactB64;
+        // The narrated re-write rendered every round's claims, so a failed
+        // consolidation above is repaired (a round-1 write failure never gets
+        // here: there is no reportPath to narrate into).
+        delete loopResult.reportError;
       }
     }
 
@@ -551,13 +560,19 @@ export class AutonomousLoop {
 
   /**
    * Normalize a validated plan: pin the goal to the user's verbatim text, drop
-   * any model-supplied summary (narrate is the single narrative source), and
-   * guarantee a report (the loop's job is gather → report).
+   * any model-supplied summary (narrate is the single narrative source), drop
+   * a report filename the configured format can't use, and guarantee a report
+   * (the loop's job is gather → report).
    */
   private normalize(data: OrchestratorRequestInput, goal: string): OrchestratorRequestInput {
     const report: { title?: string; file?: string } = {};
     if (data.report?.title) report.title = data.report.title;
-    if (data.report?.file) report.file = data.report.file;
+    // The model picks the filename but not the format (that is config): a name
+    // the configured format cannot be written under would only fail after the
+    // gather, so drop it and let the default timestamped name apply.
+    if (data.report?.file && reportFileFormatMismatch(this.reportFormat, data.report.file) === null) {
+      report.file = data.report.file;
+    }
     return { goal, gather: data.gather, report };
   }
 
@@ -783,13 +798,21 @@ export class AutonomousLoop {
     };
     let content: string | undefined;
     let artifactB64: string | undefined;
-    if (isBinaryReportFormat(this.reportFormat)) {
-      const bytes = renderReportArtifact(this.reportFormat, rendered);
-      await this.files.writeBinary(reportPath, bytes, { confirmed: true });
-      artifactB64 = bytes.toString("base64");
-    } else {
-      content = renderReport(this.reportFormat, rendered);
-      await this.files.write(reportPath, content, { confirmed: true });
+    try {
+      if (isBinaryReportFormat(this.reportFormat)) {
+        const bytes = renderReportArtifact(this.reportFormat, rendered);
+        await this.files.writeBinary(reportPath, bytes, { confirmed: true });
+        artifactB64 = bytes.toString("base64");
+      } else {
+        content = renderReport(this.reportFormat, rendered);
+        await this.files.write(reportPath, content, { confirmed: true });
+      }
+    } catch (err) {
+      // Same as a dead model: the deterministic report already written stands,
+      // and the gathered claims/gaps must not be lost to a failed re-write.
+      const error = err instanceof Error ? err.message : String(err);
+      this.audit.append("standalone_narrate", { outcome: "error", stage: "write", error });
+      return null;
     }
     this.audit.append("standalone_narrate", {
       outcome: "ok",

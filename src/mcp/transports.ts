@@ -59,6 +59,28 @@ function authHeaders(server: McpServer, resolver: SecretResolver): Record<string
   );
 }
 
+const STDERR_TAIL_CHARS = 2048;
+const stderrTails = new WeakMap<Transport, () => string>();
+
+/** Lines that state a failure, as opposed to banners, notices and stack frames. */
+const ERROR_LINE = /error|denied|not permitted|cannot|EROFS|ENOENT|EACCES/i;
+
+/**
+ * The last few lines a stdio server wrote to stderr, folded onto one line, or
+ * undefined (not a stdio transport, or nothing written). Error-looking lines
+ * are preferred when there are any, so the cause is not crowded out by a
+ * stack trace or an update notice.
+ */
+export function stderrTail(transport: Transport, maxLines = 5): string | undefined {
+  const lines = (stderrTails.get(transport)?.() ?? "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  const errors = lines.filter((l) => ERROR_LINE.test(l));
+  const picked = errors.length > 0 ? errors : lines;
+  return picked.length > 0 ? picked.slice(-maxLines).join(" | ") : undefined;
+}
+
 /**
  * Build the transport for a configured server (MCP-02/05).
  *
@@ -77,12 +99,21 @@ export function createTransport(
     for (const [key, ref] of Object.entries(server.env ?? {})) {
       env[key] = resolver.resolve(ref);
     }
-    return new StdioClientTransport({
+    const transport = new StdioClientTransport({
       command: command as string,
       args,
       env,
       stderr: "pipe",
     });
+    // Drain the child's stderr: an unread pipe fills (~64 KB) and blocks a
+    // chatty server mid-write. Keep only a bounded tail, so a server that dies
+    // at startup can say why (see `stderrTail`).
+    let tail = "";
+    transport.stderr?.on("data", (chunk: Buffer | string) => {
+      tail = (tail + chunk.toString()).slice(-STDERR_TAIL_CHARS);
+    });
+    stderrTails.set(transport, () => tail);
+    return transport;
   }
 
   const headers = authHeaders(server, resolver);

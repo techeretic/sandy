@@ -5,7 +5,7 @@ import type { McpServer } from "../config/schema.js";
 import type { SecretResolver } from "../config/loader.js";
 import { McpCallError, NullAuditSink, type HealthState, type McpAuditSink, type RetryPolicy } from "./types.js";
 import { withRetry } from "./retry.js";
-import { createTransport } from "./transports.js";
+import { createTransport, stderrTail } from "./transports.js";
 import type { NetworkGuard } from "../sandbox/network.js";
 
 export interface ManagedServerOptions {
@@ -108,7 +108,6 @@ export class ManagedServer {
     try {
       await client.connect(transport);
     } catch (err) {
-      this.setHealth("unreachable", `connect failed: ${err instanceof Error ? err.message : String(err)}`);
       // A failed connect can leave the transport holding OS handles — a
       // spawned stdio child process, or an in-flight SSE/streamable-HTTP
       // socket. Release it so the process can exit and no child is orphaned
@@ -123,6 +122,14 @@ export class ManagedServer {
       } catch {
         // client never fully connected
       }
+      // A stdio server that died at startup usually said why on stderr (e.g.
+      // an EROFS/ENOENT from a read-only boundary): without it the operator
+      // sees only "Connection closed". Read after close, once the pipe has
+      // drained. Startup output only — never a call's (it could echo data).
+      await new Promise((resolve) => setImmediate(resolve));
+      const tail = stderrTail(transport);
+      if (tail !== undefined && err instanceof Error) err.message = `${err.message} (server stderr: ${tail})`;
+      this.setHealth("unreachable", `connect failed: ${err instanceof Error ? err.message : String(err)}`);
       throw err;
     }
 

@@ -617,3 +617,32 @@ describe("runImport fetcher seam", () => {
     await rm(path.join(tmpdir(), "sandy-import-seam"), { recursive: true, force: true });
   });
 });
+
+describe("sandy import CLI output", () => {
+  async function importText(extra: string[]): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), "sandy-import-cli-"));
+    const file = path.join(dir, "m.json");
+    await writeFile(file, JSON.stringify(stdioManifest));
+    const out: string[] = [];
+    const origOut = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      out.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      const { runCli, EXIT } = await import("../src/cli.js");
+      expect(await runCli(["import", file, "-c", path.join(dir, "sandy.json"), ...extra])).toBe(EXIT.ok);
+    } finally {
+      process.stdout.write = origOut as typeof process.stdout.write;
+      await rm(dir, { recursive: true, force: true });
+    }
+    return out.join("");
+  }
+
+  it("asks for the allowlist to be confirmed only when --tools was not given", async () => {
+    expect(await importText([])).toContain("allowlist: confirm the tools above");
+    const withTools = await importText(["--tools", "crm=read_deals"]);
+    expect(withTools).toContain("allowlist: as set by --tools");
+    expect(withTools).not.toContain("confirm the tools above");
+  });
+});
