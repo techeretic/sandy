@@ -569,3 +569,23 @@ Ran v0.2.1 end-to-end against a real public MCP server (`@cyanheads/libofcongres
 - **#58 `fix(audit)`:** `seq` restarted per invocation in a shared JSONL file; every event now carries a per-session `session` id so `(session, seq)` is unique (continuing `seq` from the file tail was rejected: it races with concurrent writers).
 - **Verification:** 378/378 tests on `master` after all merges (was 349), typecheck green, CI (core + Docker/Firejail matrix + identity) green on every PR. Local macOS note: the suite needs `TMPDIR` on a non-symlinked path (`/var` → `/private/var` trips the symlink-escape guard in 57 pre-existing tests); CI on Linux is unaffected.
 - Not released: these are on `master` after v0.2.1; no version bump yet.
+
+### Review + Linux re-verification — four more fixes, 2026-09-26
+
+Reviewed everything merged after v0.2.1 (#51–#58) and re-ran the Library of Congress field test from scratch on Linux: `sandy import` of the registry `server.json` (`--tools` + `--registry-source package --apply` onto a missing manifest), then `sandy check` / `sandy run` inside `docker run --read-only --tmpfs /tmp` with the workspace as the only writable mount, then the same request under `--network none`. Fixed in PR #60:
+
+- **Security — Docker host detected as a container (fail-open).** `inDocker` matched `docker|containerd` anywhere in `/proc/self/mountinfo`; a host running containers lists their overlay rootfs there, so the bare dev host was detected as `docker` and a `runtime: "docker"` config started unsandboxed with `RESULT: OK` (confirmed against a v0.2.1 build). Only the line for the process's own `/` mount is inspected now (`rootMountLine`); verified `none` on the host, `docker` in `docker run --read-only`.
+- **stdio stderr never read.** Servers were spawned with `stderr: "pipe"` and nothing drained it: a non-Node server writing > ~64 KiB blocked forever (reproduced with a `sh` wrapper), and a startup death lost its explanation — the registry `npx` entry under the read-only rootfs said only `Connection closed`. Now drained into a 2 KiB tail; a failed connect appends its error lines (`server stderr: npm error enoent … mkdir '/home/node/.npm'`). Startup output only — call-time stderr is never copied into gaps/audit.
+- **`ask` report writes (same class as #52).** A failed multi-round consolidation re-write left round 1 on disk and exited 0 → now `reportError` (cleared if the narrate re-write renders all rounds); a failed narrate re-write threw and lost the claims → now degrades like a dead model; a model-proposed `report.file` the configured format can't use → dropped for the default name.
+- **Small:** import no longer asks to confirm an allowlist `--tools` already set; `IMPORT_DESIGN.md` described a nonexistent `--stage-dir` flag.
+- **Re-verified working:** failed import fetch audited (`outcome: "error"`); registry conversion refusals (no `--tools`; both remote + package); first-server bootstrap; a refused apply (missing `templates.json`) restores `sandy.json` and removes the bootstrapped manifest; 6 claims / 0 gaps in ~4s; footnotes 6 refs ↔ 6 defs, live links through GitHub's Markdown API; `pdf` + `.md` refused with exit 2 and no MCP call; PDF written; `--network none` → 0 claims, 3 explicit gaps, "Nothing in this report is fabricated"; one `session` id per invocation in the shared JSONL; the `custom` wording.
+- **Tests:** 387/387 (was 378, +9; each new test fails without its fix).
+
+### Release — v0.3.0: field-test hardening + a detection security fix, 2026-09-26
+
+Cut **v0.3.0** — a **minor** bump: on top of fixes it adds capability (MCP Registry `server.json` import, `macos-sandbox-exec` detection) and changes observable contracts (new exit-2/exit-1 report cases, the audit `session` field, `declaredRuntime` in the capability manifest).
+
+- **Version bump 0.2.1 → 0.3.0** in `package.json`, `package-lock.json` (top + root package only), `plugin/.claude-plugin/plugin.json`, and the two runtime identity strings (`src/plugin/mcp-server.ts`, `src/mcp/managed-server.ts`).
+- **What's in it:** PRs #51–#58 (the Seatbelt field-test findings) and #60 (the review + Linux re-verification above), plus docs (README Status, `docs/NEXT_STEPS.md`, `guide/security.md` detection note, test counts).
+- **Verification:** typecheck + build green; **387/387 tests**; CI (core + Docker/Firejail `boundary × mode` matrix + identity) green.
+- **Security:** the Docker-host detection fix closes a fail-open on Linux hosts running containers (affects ≤ v0.2.1); called out in the release notes.

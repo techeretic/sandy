@@ -50,7 +50,7 @@ plugin/               plugin manifest + install.sh
 scripts/provision-model.sh   model + runtime provisioning (out-of-band)
 config/               annotated example configs
 conformance/          egress + sandbox-matrix harnesses
-tests/                the Vitest suite (13 files, 349 tests)
+tests/                the Vitest suite (14 files, 387 tests)
 docs/                 engineering docs (PRD, design, decisions, diary)
 guide/                this consumer-facing guide
 ```

@@ -3,6 +3,8 @@
 *An exploratory, warts-and-all walkthrough: taking a public MCP server from a marketplace listing to a provenance-tracked report, inside a sandbox on a Mac. What worked, what surprised us, and what we're going to fix.*
 
 > **Update (same day):** all eight findings below have been fixed on `master` (PRs #51–#58, after v0.2.1). The walkthrough is left as it happened; see [the fixes](#update-the-fixes) at the end for what changed and what the same session looks like now.
+>
+> **Update (2026-09-26):** released in **v0.3.0**, together with four more fixes found re-running this test on Linux in a read-only Docker container. The most important is a security fix: on a Linux host running Docker, v0.2.1 mistook the bare host for a `docker` sandbox. The others: a stdio server's stderr is now drained and shown when it fails to start, and `ask` no longer drops or crashes on report re-writes.
 
 ---
 
