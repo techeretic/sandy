@@ -94,6 +94,27 @@ describe("detectRuntime", () => {
     ).toBe("wsl");
   });
 
+  it("detects docker from the container's overlay ROOT mount", () => {
+    const mountinfo =
+      "440 373 0:55 / / ro,relatime - overlay overlay rw,lowerdir=/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/5078/fs\n" +
+      "441 440 0:58 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n";
+    const readFileSync = (p: string) => (p === "/proc/self/mountinfo" ? mountinfo : "0::/\n");
+    expect(detectRuntime(ctx({ readFileSync })).runtime).toBe("docker");
+  });
+
+  it("does not call a Docker HOST a container: running containers' mounts are not the root mount", () => {
+    // A bare host running containers lists their overlay rootfs in its own
+    // mountinfo; only its own `/` (ext4 here) counts. Detecting "docker" here
+    // would let a `runtime: "docker"` config start unsandboxed.
+    const mountinfo =
+      "48 1 252:0 / / rw,relatime shared:1 - ext4 /dev/mapper/ubuntu--vg-ubuntu--lv rw\n" +
+      "506 48 0:65 / /var/lib/docker/rootfs/overlayfs/e994dbfe rw,relatime shared:463 - overlay overlay rw,lowerdir=/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/4839/fs\n" +
+      "507 48 0:66 / /run/containerd/io.containerd.runtime.v2.task/moby/abc/rootfs rw - overlay overlay rw\n";
+    const readFileSync = (p: string) =>
+      p === "/proc/self/mountinfo" ? mountinfo : p === "/proc/1/cgroup" ? "0::/init.scope\n" : "";
+    expect(detectRuntime(ctx({ readFileSync })).runtime).toBe("none");
+  });
+
   it("detects none on a plain host", () => {
     expect(detectRuntime(ctx({})).runtime).toBe("none");
   });
